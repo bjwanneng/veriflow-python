@@ -2,9 +2,10 @@
 
 AI-driven RTL design pipeline: Natural Language → Python Design Spec → Verilog.
 
-VeriFlow 将 RTL 设计流程分为 4 个阶段，每个阶段由 AI 代理执行，人类在关键节点审核：
+VeriFlow 将 RTL 设计流程分为 5 个阶段，每个阶段由 AI 代理执行：
 
 ```
+Stage 0: 初始化 & 需求澄清
 Stage 1: 需求 → AI → design_spec.py     (Python 设计规格 + 参考模型 + 测试向量)
 Stage 2: design_spec.py → AI → Verilog   (Python 函数逐个翻译为 Verilog 模块)
 Stage 3: iverilog/cocotb 仿真 → 修复 RTL Bug
@@ -46,21 +47,42 @@ Python 的赋值语义天然匹配 Verilog 非阻塞赋值（NBA）：
 Veriflow-python/
 ├── SKILL.md                          # 流程编排入口（Claude Code skill 定义）
 ├── README.md                         # 本文件
+├── install.py                        # Skill 安装脚本
+│
+├── dsl/                              # VeriFlow DSL 核心引擎
+│   ├── _types.py                     # 类型系统：Signal, Const, Cat, Mux, BinOp, ROL
+│   ├── _module.py                    # Module/Domain: m.d.comb, m.d.sync 时序域
+│   ├── _emitter.py                   # VerilogEmitter: DSL → Verilog-2005 代码生成
+│   ├── _simulator.py                 # CycleSimulator: 周期精确仿真
+│   ├── _trace.py                     # 波形追踪 & Bug 分类（Type A/B/D）
+│   ├── ext/                          # 扩展 API（FV formal 兼容接口预留）
+│   └── tests/                        # 92 个单元测试
 │
 ├── skill/                            # 流程编排层
 │   ├── init.py                       # 项目初始化：EDA 工具发现、目录创建、状态初始化
-│   └── state.py                      # 流水线状态管理：阶段顺序、前置条件、重试策略、CLI
+│   ├── state.py                      # 流水线状态管理：阶段顺序、前置条件、重试策略
+│   └── stages/                       # 各阶段执行指令（按需读取）
+│       ├── stage0_init.md            # 初始化 & 需求澄清
+│       ├── stage1_design_spec.md     # 设计规格生成
+│       ├── stage2_codegen.md         # Python→Verilog 代码生成
+│       ├── stage3_verify_fix.md      # 仿真验证 & Bug 修复
+│       └── stage4_lint_synth.md      # Lint + 综合
 │
 ├── agent/                            # 代理工具层（Stage 3/4 调用）
 │   ├── cocotb_runner.py              # Cocotb 仿真运行器
 │   ├── iverilog_runner.py            # Iverilog 纯 Verilog 仿真运行器
-│   └── vcd2table.py                  # VCD 波形解析 + 周期精确对比 + 黄金模型差异分析
+│   ├── golden_loader.py              # 黄金模型加载器
+│   └── vcd2table.py                  # VCD 波形解析 + 周期精确对比
 │
 ├── docs/                             # 规则与文档
-│   ├── coding_style.md               # Verilog-2005 编码风格指南（27 节）
-│   ├── design_rules.md               # 设计规则：复位策略、接口锁定、finalize 不变量
-│   ├── error_recovery.md             # Stage 3 错误恢复流程：数据收集、Bug 分类、根因分析
-│   └── bug_patterns.md               # 15 种已知 RTL Bug 模式库
+│   ├── design_rules.md               # 设计规则：复位策略、接口锁定
+│   ├── coding_style_core.md          # 编码风格核心规则（Stage 2 使用，~200 行）
+│   ├── coding_style.md               # 编码风格完整指南（27 节，参考用）
+│   ├── coding_style_reference.md     # 编码风格参考副本
+│   ├── error_recovery.md             # Stage 3 错误恢复流程
+│   ├── bug_patterns.md               # 已知 RTL Bug 模式库
+│   ├── bug_patterns_index.md         # Bug 模式快速索引
+│   └── template_guide.md             # 模板使用说明
 │
 └── templates/                        # 代码模板
     ├── design_spec_template.py       # design_spec.py 模板（8 节结构）
@@ -68,41 +90,11 @@ Veriflow-python/
     └── cocotb_template.py            # Cocotb testbench 模板
 ```
 
-## 文件说明
-
-### skill/ — 流程编排层
-
-| 文件 | 功能 |
-|------|------|
-| `init.py` | 项目初始化：自动发现 Python/iverilog/yosys/cocotb，创建 `workspace/` 目录结构，生成 `.veriflow/eda_env.sh`，初始化流水线状态 |
-| `state.py` | 流水线状态管理：`PipelineState` 数据类，阶段顺序与前置条件检查，重试预算（每阶段 3 次），阶段计时，CLI 入口点 |
-
-### agent/ — 代理工具层
-
-| 文件 | 功能 |
-|------|------|
-| `cocotb_runner.py` | 运行 cocotb 测试：自动编译 RTL、驱动输入、逐周期对比内部信号，报告首次分歧点 |
-| `iverilog_runner.py` | 运行 iverilog+vvp 仿真：解析 `[PASS]`/`[FAIL]` 输出，分类 Bug 类型（A/B/D），黄金模型自检 |
-| `vcd2table.py` | VCD 解析器：生成周期精确信号表，与黄金模型逐周期对比，时序断言检查，LLM 可读差异报告 |
-
-### docs/ — 规则与文档
-
-| 文件 | 功能 |
-|------|------|
-| `coding_style.md` | Verilog-2005 编码风格完整指南：格式化、命名、两块模式、FSM 规则、流水线纪律（27 节） |
-| `design_rules.md` | 核心设计规则：同步高有效复位、接口锁定（Stage 1 后冻结）、finalize-state 不变量 |
-| `error_recovery.md` | Stage 3 错误恢复标准流程：5 步数据收集 → Bug 分类 → 5 点根因分析 → 修复 → 重试 |
-| `bug_patterns.md` | 15 种已知 Bug 模式：症状、根因、修复方案、预防规则，按阶段标注 |
-
-### templates/ — 代码模板
-
-| 文件 | 功能 |
-|------|------|
-| `design_spec_template.py` | design_spec.py 的 8 节模板：接口定义、模块层次、算法常量、辅助函数、模块伪代码、顶层集成、测试向量、标准接口 |
-| `tb_integration_template.v` | Verilog testbench 模板：NBA 时序、复位序列、多块消息、输出采样 |
-| `cocotb_template.py` | Cocotb testbench 模板：复位、协议驱动、分层黄金模型对比、内部信号对比 |
-
 ## 流水线阶段详解
+
+### Stage 0: 初始化 & 需求澄清
+
+运行 `init.py` 创建项目骨架，自动发现 EDA 工具（iverilog/yosys/cocotb），读取输入文件并按 A-G 七类进行需求澄清。
 
 ### Stage 1: design_spec
 
@@ -110,9 +102,9 @@ Veriflow-python/
 
 输出：`workspace/docs/design_spec.py`
 
-AI 代理生成单个 Python 文件，包含完整的设计规格、可运行的参考模型和标准测试向量。人类审核此文件，确认算法正确后再进入 Stage 2。
+AI 代理生成单个 Python 文件，包含 8 节结构：接口定义、模块层次、算法常量、辅助函数、模块伪代码、顶层集成、测试向量、标准接口。人类审核此文件，确认算法正确后再进入 Stage 2。
 
-验证：运行 `python design_spec.py`，所有测试向量必须 PASS。
+可选：使用 VeriFlow DSL 编写 `build_*()` 函数，通过 `VerilogEmitter` 确定性生成 Verilog，跳过 AI 翻译。
 
 ### Stage 2: codegen
 
@@ -120,21 +112,19 @@ AI 代理生成单个 Python 文件，包含完整的设计规格、可运行的
 
 输出：`workspace/rtl/*.v` + `workspace/tb/`
 
-每个 Python 函数翻译为一个 Verilog 模块。并行启动多个代理，每个模块一个。
+每个 Python 函数翻译为一个 Verilog 模块。17 条翻译规则 + 5 条关键规则（R1-R5）确保正确性。支持 DSL 路径（如果 `build_*()` 存在）和 AI 翻译路径。生成后进行 iverilog 语法验证。
 
 ### Stage 3: verify_fix
 
 输入：RTL + testbench
 
-运行 iverilog 仿真（或 cocotb 逐周期对比）。如果失败，执行 5 步错误恢复流程，最多 3 次重试。
+运行设计规格自检 → DSL 周期追踪 → cocotb 逐周期对比 → iverilog 仿真。如果失败，执行 5 点根因分析 + Bug 模式匹配，最多 3 次重试。
 
 ### Stage 4: lint_synth
 
 并行运行 lint（iverilog 语法检查）和 synthesis（yosys 综合报告）。
 
 ## 安装为 Claude Code Skill
-
-将本项目目录安装为 Claude Code skill：
 
 ```bash
 # 方法 1：使用安装脚本
@@ -148,15 +138,13 @@ ln -s /path/to/Veriflow-python ~/.claude/skills/vf-pyverilog
 mklink /D "%USERPROFILE%\.claude\skills\vf-pyverilog" "C:\path\to\Veriflow-python"
 ```
 
-安装后，在 Claude Code 中使用：
+安装后在 Claude Code 中使用：
 
 ```
 /vf-pyverilog /path/to/project
 ```
 
 ## 项目输入文件
-
-在项目目录中准备以下文件：
 
 | 文件 | 必需 | 说明 |
 |------|------|------|
@@ -171,6 +159,13 @@ mklink /D "%USERPROFILE%\.claude\skills\vf-pyverilog" "C:\path\to\Veriflow-pytho
 - 同步高有效复位，端口名 `rst`
 - 端口命名：`_n` 后缀表示低有效，`_i`/`_o` 表示方向
 - 接口锁定：端口名、握手协议、模块层次在 Stage 1 后冻结
+- Python `==`/`!=` 运算符返回 DSL `BinOp`（不返回 `bool`），与 `NotImplemented` 回退兼容
+
+## 运行测试
+
+```bash
+python -m pytest dsl/tests/ -v
+```
 
 ## 许可证
 
