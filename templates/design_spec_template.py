@@ -89,43 +89,37 @@ MASK32 = 0xFFFFFFFF  # 32-bit mask for modular arithmetic
 # CRITICAL: Lookup tables (LUT) and wide constants (>64 bit) MUST be computed
 # by Python code below, NEVER hand-written by the AI agent. The agent must
 # call these generator functions and copy the output verbatim into Verilog.
-#
+
+
+def print_lut_verilog(name: str, values: list[int], width: int = 32):
+    """Print a LUT as Verilog localparam array. Call from design_spec.py main block."""
+    print(f"localparam [{width-1}:0] {name} [0:{len(values)-1}] = {{")
+    for i, v in enumerate(values):
+        comma = "," if i < len(values) - 1 else ""
+        print(f"    {width}'h{v:0{width//4}x}{comma}  // [{i}]")
+    print("};")
+
+
+def print_wide_const_verilog(value: int, width: int, name: str):
+    """Print a wide constant as Verilog concatenation of 32-bit segments."""
+    segments = []
+    for i in range(width // 32 - 1, -1, -1):
+        seg = (value >> (i * 32)) & 0xFFFFFFFF
+        segments.append(f"32'h{seg:08x}")
+    print(f"localparam [{width-1}:0] {name} = {{")
+    for i in range(0, len(segments), 4):
+        line_segs = ", ".join(segments[i:i+4])
+        trailing = "," if i + 4 < len(segments) else ""
+        print(f"    {line_segs}{trailing}")
+    print("};")
+
+
 # Pattern for LUT / ROM constants:
-#   1. Define the computation function (e.g., ROL-based LUT, round constants)
-#   2. Add a print_<name>_verilog() function that outputs Verilog localparam
-#   3. The AI agent calls print_<name>_verilog() and copies stdout into the .v file
+#   1. Define the computation function (e.g., _compute_t_rot_lut())
+#   2. Call print_lut_verilog("T_ROT_LUT", values) to generate Verilog output
+#   3. Copy the stdout output into the .v file
 #
-# Example:
-#   def _compute_t_rot_lut():
-#       """Compute rotation lookup table values."""
-#       lut = []
-#       for j in range(64):
-#           val = ROL(T_CONST[j % 16], j, 32)
-#           lut.append(val)
-#       return lut
-#
-#   def print_t_rot_lut_verilog():
-#       """Print T_ROT_LUT as Verilog localparam (copy-paste into .v)."""
-#       lut = _compute_t_rot_lut()
-#       print("localparam [31:0] T_ROT_LUT [0:63] = {")
-#       for i, v in enumerate(lut):
-#           comma = "," if i < len(lut) - 1 else ""
-#           print(f"    32'h{v:08x}{comma}  // [{i}]")
-#       print("};")
-#
-# Wide constant pattern (>64 bit, must use concatenation per coding_style.md):
-#   def print_wide_const_verilog(value: int, width: int, name: str):
-#       """Print a wide constant as Verilog concatenation of 32-bit segments."""
-#       segments = []
-#       for i in range(width // 32 - 1, -1, -1):
-#           seg = (value >> (i * 32)) & 0xFFFFFFFF
-#           segments.append(f"32'h{seg:08x}")
-#       print(f"localparam [{width-1}:0] {name} = {{")
-#       for i in range(0, len(segments), 4):
-#           line_segs = ", ".join(segments[i:i+4])
-#           trailing = "," if i + 4 < len(segments) else ""
-#           print(f"    {line_segs}{trailing}")
-#       print("};")
+# For wide constants (>64 bit), use print_wide_const_verilog(value, width, name).
 
 
 # ============================================================
@@ -146,29 +140,20 @@ def ROL(x: int, n: int, width: int = 32) -> int:
 
 
 # ============================================================
-# Section 4.5: DSL Module Construction (Layer 0 + Layer 1)
+# Section 4.5: DSL Module Construction (NOT RECOMMENDED)
 # ============================================================
-# OPTIONAL: Use the VeriFlow DSL for formal timing semantics.
-# Replaces informal # wire / # reg_next annotations with
-# m.d.comb / m.d.sync domain assignments.
+# The VeriFlow DSL provides formal timing semantics but is only suitable
+# for simple leaf modules (counters, muxes, small datapaths).
+# For complex designs (hash, cipher, processor), use plain Python with
+# # wire / # reg_next annotations in Section 5 — this is the DEFAULT path.
 #
+# DSL is available if needed:
 # from dsl import Module, Signal, Const, Cat, Mux
-#
 # def build_<module_name>():
 #     m = Module("<module_name>")
-#
-#     # Declare ports
-#     data_in = Signal(32, name="data_in")
-#     data_out = Signal(32, name="data_out")
-#     m.add_input(data_in)
-#     m.add_output(data_out)
-#
-#     # Combinational logic (wire, same-cycle)
-#     m.d.comb += data_out.eq(data_in ^ Const(0xFFFFFFFF, 32))
-#
-#     # OR: Registered logic (next-cycle)
-#     # m.d.sync += counter.eq(counter + Const(1, 8))
-#
+#     ...
+#     m.d.comb += sig.eq(expr)   # combinational
+#     m.d.sync += sig.eq(expr)   # registered
 #     return m
 #
 # Benefits:
@@ -268,9 +253,9 @@ def <submodule_name>(<param1>, <param2>, ..., calc_en, init_vals):
 def compute(inputs: dict, trace: bool = False) -> dict | list[dict]:
     """Execute the design cycle-accurately.
 
-    Auto-detects DSL mode: if build_<top_module>() exists in globals,
-    uses CycleSimulator for cycle-accurate simulation. Otherwise falls
-    back to manual state tracking (the legacy path below).
+    Default path: manual state tracking with plain Python functions.
+    DSL auto-detection: if build_<top_module>() exists in globals,
+    uses CycleSimulator instead. DSL is only recommended for simple designs.
 
     Args:
         inputs: {"blocks": [int, ...], "is_last_flags": [bool, ...]}
@@ -460,8 +445,50 @@ def get_test_vectors() -> list[dict]:
 if __name__ == "__main__":
     import sys
 
+    # === Interface Contract Validation (auto-injected, DO NOT EDIT) ===
+    print("=== Interface Contract Validation ===")
+    _contract_ok = True
+
+    # Check compute() signature
+    import inspect
+    _sig = inspect.signature(compute)
+    _params = list(_sig.parameters.keys())
+    if _params != ["inputs", "trace"]:
+        print(f"[FATAL] compute() signature mismatch: {_params} != ['inputs', 'trace']")
+        _contract_ok = False
+
+    # Check run() signature
+    _sig_run = inspect.signature(run)
+    _params_run = list(_sig_run.parameters.keys())
+    if _params_run != ["test_vector_index"]:
+        print(f"[FATAL] run() signature mismatch: {_params_run} != ['test_vector_index']")
+        _contract_ok = False
+
+    # Check get_test_vectors() signature
+    _sig_gtv = inspect.signature(get_test_vectors)
+    _params_gtv = list(_sig_gtv.parameters.keys())
+    if _params_gtv != []:
+        print(f"[FATAL] get_test_vectors() signature mismatch: {_params_gtv} != []")
+        _contract_ok = False
+
+    # Functional smoke: compute must accept dict input
+    try:
+        _tv0 = TEST_VECTORS[0]
+        _r = compute(_tv0["inputs"], trace=False)
+        if not isinstance(_r, dict):
+            print(f"[FATAL] compute(trace=False) must return dict, got {type(_r).__name__}")
+            _contract_ok = False
+    except Exception as _e:
+        print(f"[FATAL] compute() smoke test failed: {_e}")
+        _contract_ok = False
+
+    if _contract_ok:
+        print("[PASS] Interface contract OK")
+    else:
+        sys.exit(1)
+
     # Run cycle trace for vcd2table
-    print("=== Design Spec: cycle trace ===")
+    print("\n=== Design Spec: cycle trace ===")
     cycles = run(0)
     for i, entry in enumerate(cycles):
         parts = []

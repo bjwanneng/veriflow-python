@@ -211,11 +211,14 @@ class PipelineState:
         """Validate design_spec.py completeness after Stage 1.
 
         Checks: file exists, valid Python syntax, defines required functions
-        (run, compute, get_test_vectors), and self-test passes all test vectors.
+        (run, compute, get_test_vectors) with correct signatures, and self-test
+        passes all test vectors.
 
         Returns:
             (is_valid, issues) — is_valid=True means design spec is usable.
         """
+        import importlib.util
+        import inspect
         import py_compile
 
         issues = []
@@ -231,21 +234,74 @@ class PipelineState:
             issues.append(f"design_spec.py syntax error: {e}")
             return (False, issues)
 
-        # Check required functions
-        content = ds_path.read_text(encoding="utf-8")
-        for func_name in ("run", "compute", "get_test_vectors"):
-            if f"def {func_name}(" not in content:
+        # Load module for signature-level validation
+        try:
+            spec = importlib.util.spec_from_file_location("_ds", str(ds_path))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        except Exception as e:
+            issues.append(f"design_spec.py import error: {e}")
+            return (False, issues)
+
+        # Check required functions with exact signature validation
+        required_sigs = {
+            "compute": (["inputs", "trace"], {"trace": True}),
+            "run": (["test_vector_index"], {"test_vector_index": True}),
+            "get_test_vectors": ([], {}),
+        }
+        for func_name, (expected_params, default_params) in required_sigs.items():
+            if not hasattr(mod, func_name):
                 issues.append(f"design_spec.py missing {func_name}() function")
+                continue
+            func = getattr(mod, func_name)
+            if not callable(func):
+                issues.append(f"{func_name} exists but is not callable")
+                continue
+            try:
+                sig = inspect.signature(func)
+                actual_params = list(sig.parameters.keys())
+                if actual_params != expected_params:
+                    issues.append(
+                        f"{func_name}() signature mismatch: "
+                        f"expected {expected_params}, got {actual_params}"
+                    )
+                # Verify default values
+                for pname, should_have_default in default_params.items():
+                    param = sig.parameters.get(pname)
+                    if param is None:
+                        continue
+                    if should_have_default and param.default is inspect.Parameter.empty:
+                        issues.append(
+                            f"{func_name}(): parameter '{pname}' must have a default value"
+                        )
+            except (ValueError, TypeError):
+                pass
+
+        # Check required variables
+        for var_name in ("DESIGN_NAME", "MASK32", "TEST_VECTORS"):
+            if not hasattr(mod, var_name):
+                issues.append(f"design_spec.py missing {var_name} variable")
 
         # Check for module pseudocode functions (Section 5)
+        content = ds_path.read_text(encoding="utf-8")
         if "Section 5" not in content and "# Module Pseudocode" not in content:
             issues.append("design_spec.py missing Section 5: Module Pseudocode")
 
-        # Check for test vectors (Section 7)
-        if "TEST_VECTORS" not in content:
-            issues.append("design_spec.py missing TEST_VECTORS")
-
         if issues:
+            return (False, issues)
+
+        # Functional smoke: compute must accept dict input
+        try:
+            if hasattr(mod, "TEST_VECTORS") and mod.TEST_VECTORS:
+                tv0 = mod.TEST_VECTORS[0]
+                result = mod.compute(tv0["inputs"], trace=False)
+                if not isinstance(result, dict):
+                    issues.append(
+                        f"compute(trace=False) must return dict, got {type(result).__name__}"
+                    )
+                    return (False, issues)
+        except Exception as e:
+            issues.append(f"compute() smoke test failed: {e}")
             return (False, issues)
 
         # Run the self-test

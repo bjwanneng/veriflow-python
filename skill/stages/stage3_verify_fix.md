@@ -102,8 +102,59 @@ TaskUpdate complete. Go to Stage 4.
 4. **Collect data**: read `logs/sim.log`, run vcd2table diff, classify bug type
 5. **5-point root cause analysis** → write to `stage_journal.md`
 6. **Fix RTL** using Edit tool
-7. **Re-run simulation** (go back to "Run simulation")
-8. **Retry budget**: 3 attempts total
+7. **Port consistency check** (ensure fix didn't break interface):
+   ```bash
+   cd "$PROJECT_DIR"
+   $PYTHON_EXE -c "
+   import re, sys, glob
+
+   with open('workspace/docs/design_spec.py', 'r') as f:
+       spec_content = f.read()
+   spec_ports = set()
+   for m in re.finditer(r'(input|output)\s+wire\s+(?:\[\d+:\d+\]\s+)?(\w+)', spec_content):
+       spec_ports.add(m.group(2))
+
+   design_name_match = re.search(r\"DESIGN_NAME\s*=\s*['\\\"](\\w+)['\\\"]\" , spec_content)
+   if not design_name_match:
+       print('[SKIP] Cannot determine DESIGN_NAME for port check')
+       sys.exit(0)
+
+   top_module = design_name_match.group(1)
+   top_file = f'workspace/rtl/{top_module}.v'
+   if not __import__('os').path.isfile(top_file):
+       # Try finding it with a different naming convention
+       candidates = glob.glob(f'workspace/rtl/*.v')
+       top_file = None
+       for c in candidates:
+           with open(c, 'r') as f:
+               if f'module {top_module}' in f.read():
+                   top_file = c
+                   break
+       if not top_file:
+           print('[SKIP] Top module file not found')
+           sys.exit(0)
+
+   with open(top_file, 'r') as f:
+       vcontent = f.read()
+   verilog_ports = set()
+   for m in re.finditer(r'(input|output)\s+wire\s+(?:\[\d+:\d+\]\s+)?(\w+)', vcontent):
+       verilog_ports.add(m.group(2))
+   verilog_ports -= {'clk', 'rst'}
+   spec_ports -= {'clk', 'rst'}
+
+   missing = spec_ports - verilog_ports
+   extra = verilog_ports - spec_ports
+   if missing or extra:
+       print(f'[WARN] Port drift detected after fix:')
+       if missing: print(f'  Missing from Verilog: {missing}')
+       if extra: print(f'  Extra in Verilog: {extra}')
+       print('  If intentional, proceed. If accidental, revert the port change.')
+   else:
+       print('[OK] Port consistency maintained after fix')
+   "
+   ```
+8. **Re-run simulation** (go back to "Run simulation")
+9. **Retry budget**: 3 attempts total
    - 1st fail: fix RTL, retry
    - 2nd fail: `$PYTHON_EXE "${CLAUDE_SKILL_DIR}/skill/state.py" "$PROJECT_DIR" --reset codegen`, restart Stage 2
    - 3rd fail: STOP, notify user

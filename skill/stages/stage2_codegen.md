@@ -69,12 +69,43 @@ print('yes' if has_build else 'no')
 If `yes`: import DSL, run `VerilogEmitter().emit(build_fn())` for each `build_*()`. No AI translation needed.
 If `no`: use standard AI path below.
 
+## Port Skeleton Extraction (Interface Lock)
+
+Before dispatching codegen agents, extract the port/interface contract from
+design_spec.py Section 1 and Section 5. This is the **single source of truth**
+for all Verilog module ports.
+
+```bash
+$PYTHON_EXE -c "
+import importlib.util, json, re, sys
+spec = importlib.util.spec_from_file_location('ds', '$PROJECT_DIR/workspace/docs/design_spec.py')
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+# Extract DESIGN_NAME
+print(f'DESIGN_NAME: {mod.DESIGN_NAME}')
+
+# Extract module names from Section 5 functions
+import inspect
+funcs = [(name, obj) for name, obj in inspect.getmembers(mod, inspect.isfunction)
+         if not name.startswith('_') and name not in ('compute', 'run', 'get_test_vectors',
+            'ROL', 'print_lut_verilog', 'print_wide_const_verilog')]
+for name, func in funcs:
+    sig = inspect.signature(func)
+    params = list(sig.parameters.keys())
+    print(f'MODULE: {name}({', '.join(params)})')
+" 2>&1 | tee workspace/docs/module_contract.txt
+```
+
 ## Standard AI Translation Path
 
 Dispatch ALL agents in parallel:
 
 - **One vf-coder per module** (subagent_type: general-purpose)
   - Prompt includes: MODULE_NAME, OUTPUT_FILE, design_spec.py content, coding_style_core.md content
+  - **HARD CONSTRAINT**: The module port list MUST match design_spec.py Section 1
+    (for top module) or Section 5 function parameters (for submodules).
+    Port names and widths are FROZEN — do NOT rename or resize.
   - 5-section structured prompt: TRANSLATION RULES → TIMING CONTRACT → CRITICAL RULES → VERIFICATION CHECKLIST → CODE
 
 - **One vf-tb-gen** (subagent_type: general-purpose)
@@ -84,6 +115,68 @@ After ALL return, verify outputs:
 ```bash
 ls "$PROJECT_DIR/workspace/rtl/"*.v "$PROJECT_DIR/workspace/tb/"*.v "$PROJECT_DIR/workspace/tb/"*.py 2>/dev/null
 ```
+
+## Port Consistency Validation (Post-Agent Check)
+
+After all codegen agents return, verify that the generated Verilog module ports
+match the design_spec.py interface definition:
+
+```bash
+cd "$PROJECT_DIR"
+$PYTHON_EXE -c "
+import re, sys
+
+# Parse design_spec.py for module interface comments
+# Look for Section 1 port declarations
+with open('workspace/docs/design_spec.py', 'r') as f:
+    spec_content = f.read()
+
+# Extract port names from spec (comment lines like 'input  wire [511:0] msg_block')
+spec_ports = set()
+for m in re.finditer(r'(input|output)\s+wire\s+(?:\[\d+:\d+\]\s+)?(\w+)', spec_content):
+    spec_ports.add(m.group(2))
+
+# Parse each generated Verilog file for its port list
+import glob
+errors = []
+for vfile in sorted(glob.glob('workspace/rtl/*.v')):
+    with open(vfile, 'r') as f:
+        vcontent = f.read()
+    # Extract module name
+    mod_match = re.search(r'module\s+(\w+)', vcontent)
+    if not mod_match:
+        errors.append(f'{vfile}: no module declaration found')
+        continue
+    mod_name = mod_match.group(1)
+
+    # For the top-level module, check port names match spec
+    # (Skip submodules — their ports come from Section 5 pseudocode)
+    design_name = re.search(r'DESIGN_NAME\s*=\s*['\'](\\w+)['\']', spec_content)
+    if design_name and mod_name == design_name.group(1):
+        verilog_ports = set()
+        for m in re.finditer(r'(input|output)\s+wire\s+(?:\[\d+:\d+\]\s+)?(\w+)', vcontent):
+            verilog_ports.add(m.group(2))
+        # clk and rst are always present but may not be in spec comments
+        verilog_ports -= {'clk', 'rst'}
+        spec_no_clk = spec_ports - {'clk', 'rst'}
+        missing = spec_no_clk - verilog_ports
+        extra = verilog_ports - spec_no_clk
+        if missing:
+            errors.append(f'{vfile} ({mod_name}): missing ports from spec: {missing}')
+        if extra:
+            errors.append(f'{vfile} ({mod_name}): extra ports not in spec: {extra}')
+
+if errors:
+    print('[FAIL] Port consistency check:')
+    for e in errors:
+        print(f'  - {e}')
+    sys.exit(1)
+else:
+    print('[PASS] Port consistency OK')
+"
+```
+
+If port consistency fails, the offending module must be fixed before proceeding.
 
 ## Syntax Verification (before Stage 3)
 
