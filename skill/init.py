@@ -77,11 +77,12 @@ def discover_python() -> str:
                 "AppData/Local/Programs/Python/*/python.exe"
             ):
                 candidates.append(str(p))
-    # Unix locations
-    for d in ("/usr/bin", "/usr/local/bin"):
-        p = Path(d) / "python3"
-        if p.exists():
-            candidates.append(str(p))
+    # Unix locations (harmless on Windows — paths won't exist)
+    if sys.platform != "win32":
+        for d in ("/usr/bin", "/usr/local/bin"):
+            p = Path(d) / "python3"
+            if p.exists():
+                candidates.append(str(p))
 
     for p in candidates:
         # Skip Windows Store stub
@@ -100,21 +101,43 @@ def discover_python() -> str:
 
 def discover_eda() -> tuple[str, str]:
     """Find EDA tools (iverilog, yosys). Returns (eda_bin, eda_lib)."""
-    # Search both Unix-style and Windows-style paths.
-    # On Windows, Python uses native filesystem APIs so /c/oss-cad-suite
-    # resolves to C:\c\oss-cad-suite (wrong). We need C:\oss-cad-suite.
-    search_dirs = [
-        r"C:\oss-cad-suite",
-        r"C:\Program Files\iverilog",
-        r"C:\Program Files (x86)\iverilog",
-        "/c/oss-cad-suite",
-        "/c/Program Files/iverilog",
-        "/c/Program Files (x86)/iverilog",
-        "/opt/oss-cad-suite",
-        "/usr/local",
-        "/usr",
-        os.path.expanduser("~/.local"),
-    ]
+    # Check existing EDA_BIN env var first (user override or previous run).
+    existing = os.environ.get("EDA_BIN", "")
+    if existing:
+        # Normalize MSYS paths on Windows
+        if sys.platform == "win32" and existing.startswith("/"):
+            import re
+            existing = re.sub(r'^/([A-Za-z])/', lambda m: f'{m.group(1).upper()}:/', existing)
+        bin_dir = Path(existing)
+        if bin_dir.is_dir() and any((bin_dir / n).exists() for n in ("iverilog", "iverilog.exe")):
+            eda_bin = str(bin_dir)
+            eda_lib = ""
+            lib_dir = bin_dir.parent / "lib"
+            if lib_dir.is_dir():
+                eda_lib = str(lib_dir)
+            ivl_dir = bin_dir.parent / "lib" / "ivl"
+            if ivl_dir.is_dir():
+                eda_lib = f"{eda_lib}{os.pathsep}{ivl_dir}" if eda_lib else str(ivl_dir)
+            return eda_bin, eda_lib
+
+    # Platform-specific search paths.
+    # On Windows native Python, Unix-style /c/ paths resolve incorrectly
+    # (e.g., /c/oss-cad-suite → C:\c\oss-cad-suite instead of C:\oss-cad-suite).
+    # Only include paths appropriate for the current platform.
+    search_dirs = []
+    if sys.platform == "win32":
+        search_dirs.extend([
+            r"C:\oss-cad-suite",
+            r"C:\Program Files\iverilog",
+            r"C:\Program Files (x86)\iverilog",
+        ])
+    else:
+        search_dirs.extend([
+            "/opt/oss-cad-suite",
+            "/usr/local",
+            "/usr",
+        ])
+    search_dirs.append(os.path.expanduser("~/.local"))
 
     for base in search_dirs:
         base_path = Path(base)
@@ -236,10 +259,21 @@ def smoke_test_vvp(iverilog_path: str, timeout: int = 15) -> tuple[bool, str]:
             return False, f"vvp smoke test timed out after {timeout}s (possible runtime error)"
 
 
-def discover_yosys() -> str:
+def discover_yosys(eda_bin_hint: str = "") -> str:
     """Find yosys executable. Returns path or empty string."""
+    # Use provided hint first (already normalized, from discover_eda())
+    if eda_bin_hint:
+        for name in ("yosys", "yosys.exe"):
+            p = Path(eda_bin_hint) / name
+            if p.exists():
+                return str(p)
+    # Check EDA_BIN env var (may need MSYS normalization)
     eda_bin = os.environ.get("EDA_BIN", "")
     if eda_bin:
+        # Normalize MSYS paths on Windows
+        if sys.platform == "win32" and eda_bin.startswith("/"):
+            import re
+            eda_bin = re.sub(r'(^|[:;])/([A-Za-z])/', lambda m: f'{m.group(2).upper()}:/', eda_bin)
         for name in ("yosys", "yosys.exe"):
             p = Path(eda_bin) / name
             if p.exists():
@@ -249,7 +283,12 @@ def discover_yosys() -> str:
         if found:
             return found
     # Check common installation directories
-    for base in [r"C:\oss-cad-suite", "/opt/oss-cad-suite", "/usr/local", "/usr"]:
+    bases = []
+    if sys.platform == "win32":
+        bases.append(r"C:\oss-cad-suite")
+    else:
+        bases.extend(["/opt/oss-cad-suite", "/usr/local", "/usr"])
+    for base in bases:
         for name in ("yosys", "yosys.exe"):
             p = Path(base) / "bin" / name
             if p.exists():
@@ -346,7 +385,7 @@ def main():
     eda_bin, eda_lib = discover_eda()
     print(f"[ENV] EDA_BIN={eda_bin}  EDA_LIB={eda_lib}")
 
-    yosys_exe = discover_yosys()
+    yosys_exe = discover_yosys(eda_bin_hint=eda_bin)
     print(f"[ENV] Yosys: {yosys_exe or 'NOT FOUND'}")
 
     # Detect IVL_HOME (iverilog needs this for its internal preprocessor)
@@ -361,38 +400,75 @@ def main():
                 ivl_home = str(candidate.resolve())
                 break
 
-    # Write eda_env.sh
-    # Use os.pathsep for PATH entries (":" on Unix, ";" on Windows native,
-    # but ":" in bash/MSYS2/Git Bash where this script is sourced)
+    # ── Write eda_env.sh and eda_env.json ──────────────────────────────
     veriflow_dir = project_dir / ".veriflow"
-    eda_env_path = veriflow_dir / "eda_env.sh"
-    # Build PATH line, skipping empty entries
-    path_entries = [p for p in [eda_bin, eda_lib] if p]
-    path_entries.append("$PATH")
-    # eda_env.sh is sourced by bash — use ":" as separator (works in Git Bash on Windows)
-    path_str = ":".join(path_entries)
-    # For EDA_LIB, also use ":" since it's consumed by bash scripts
+
+    # Preserve native platform paths for JSON output (never overwrite originals).
+    python_exe_native = python_exe
+    eda_bin_native = eda_bin
+    eda_lib_native = eda_lib
+    ivl_home_native = ivl_home
+    yosys_exe_native = yosys_exe
+
+    # Convert EDA_LIB separator to ":" for bash scripts (semicolon on Windows).
     eda_lib_bash = eda_lib.replace(os.pathsep, ":") if os.pathsep != ":" else eda_lib
 
-    # On Windows, convert backslash paths to forward-slash for bash compatibility
+    # Build PATH for bash (colon-separated, bash convention).
+    path_entries = [p for p in [eda_bin, eda_lib_bash] if p]
+    path_entries.append("$PATH")
+    path_str = ":".join(path_entries)
+
+    # On Windows, convert native paths to forward-slash C:/path format.
+    # IMPORTANT: Use C:/path (not MSYS /c/path) so that:
+    #   - Git Bash can still find executables (handles C:/ correctly)
+    #   - Python child processes can resolve paths (Path("C:/...") works on Windows)
+    #   - MSYS /c/path breaks Python: Path("/c/...") → C:\c\... (wrong!)
+    def _to_bash_path(p):
+        """Convert Windows backslashes to forward slashes and semicolons to colons."""
+        return p.replace("\\", "/").replace(";", ":") if p else p
+
     if sys.platform == "win32":
-        python_exe = python_exe.replace("\\", "/")
-        eda_bin = eda_bin.replace("\\", "/")
-        eda_lib_bash = eda_lib_bash.replace("\\", "/")
-        ivl_home = ivl_home.replace("\\", "/")
-        yosys_exe = yosys_exe.replace("\\", "/")
-        path_str = path_str.replace("\\", "/")
+        python_exe_bash = _to_bash_path(python_exe)
+        eda_bin_bash = _to_bash_path(eda_bin)
+        eda_lib_bash_out = _to_bash_path(eda_lib_bash)
+        ivl_home_bash = _to_bash_path(ivl_home)
+        yosys_exe_bash = _to_bash_path(yosys_exe)
+        path_str = _to_bash_path(path_str)
+    else:
+        python_exe_bash = python_exe
+        eda_bin_bash = eda_bin
+        eda_lib_bash_out = eda_lib_bash
+        ivl_home_bash = ivl_home
+        yosys_exe_bash = yosys_exe
+
+    # Write eda_env.sh (sourced by bash at each pipeline stage)
+    eda_env_path = veriflow_dir / "eda_env.sh"
     with open(eda_env_path, "w", encoding="utf-8") as f:
-        f.write(f'export PYTHON_EXE="{python_exe}"\n')
-        f.write(f'export EDA_BIN="{eda_bin}"\n')
-        f.write(f'export EDA_LIB="{eda_lib_bash}"\n')
-        f.write(f'export IVL_HOME="{ivl_home}"\n')
+        f.write(f'export PYTHON_EXE="{python_exe_bash}"\n')
+        f.write('export PYTHONUTF8=1\n')
+        f.write(f'export EDA_BIN="{eda_bin_bash}"\n')
+        f.write(f'export EDA_LIB="{eda_lib_bash_out}"\n')
+        f.write(f'export IVL_HOME="{ivl_home_bash}"\n')
         f.write(f'export COCOTB_AVAILABLE="{"true" if cocotb_available else "false"}"\n')
-        f.write(f'export YOSYS_EXE="{yosys_exe}"\n')
+        f.write(f'export YOSYS_EXE="{yosys_exe_bash}"\n')
         f.write(f'export PATH="{path_str}"\n')
     print(f"[ENV] Wrote {eda_env_path}")
-    if ivl_home:
-        print(f"[ENV] IVL_HOME={ivl_home}")
+
+    # Write eda_env.json (native platform paths, consumed by Python runners)
+    eda_env_json = {
+        "python_exe": python_exe_native,
+        "eda_bin": eda_bin_native,
+        "eda_lib": eda_lib_native,
+        "ivl_home": ivl_home_native,
+        "yosys_exe": yosys_exe_native,
+        "cocotb_available": cocotb_available,
+    }
+    eda_json_path = veriflow_dir / "eda_env.json"
+    eda_json_path.write_text(json.dumps(eda_env_json, indent=2), encoding="utf-8")
+    print(f"[ENV] Wrote {eda_json_path}")
+
+    if ivl_home_native:
+        print(f"[ENV] IVL_HOME={ivl_home_native}")
 
     # Verify iverilog actually runs (catches DLL issues on Windows)
     if eda_bin:
@@ -467,14 +543,14 @@ def main():
     # Init journal
     init_journal(project_dir, state["is_resume"])
 
-    # Output structured JSON for main session
+    # Output structured JSON for main session (always native platform paths)
     result = {
         "project_dir": str(project_dir),
-        "python_exe": python_exe,
-        "eda_bin": eda_bin,
-        "eda_lib": eda_lib,
+        "python_exe": python_exe_native,
+        "eda_bin": eda_bin_native,
+        "eda_lib": eda_lib_native,
         "cocotb_available": cocotb_available,
-        "yosys_exe": yosys_exe,
+        "yosys_exe": yosys_exe_native,
         "is_resume": state["is_resume"],
         "stages_completed": state["stages_completed"],
         "next_stage": state["next_stage"],

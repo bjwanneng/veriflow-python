@@ -376,6 +376,30 @@ async def wait_valid(dut, valid_name='valid_out', max_cycles=None):
     return -1  # timeout
 
 
+# ─── Multi-block NBA-aware wait pattern ─────────────────────────────────
+# IMPORTANT: When sending multiple blocks to a DUT with FSM (IDLE→CALC→DONE→IDLE),
+# you MUST account for NBA propagation after driving each block.
+#
+# At RisingEdge N, cocotb reads POST-NBA of posedge N-1.
+# After drive_inputs(), the DUT transitions state at the NEXT posedge.
+# You must wait at least ONE RisingEdge for the NBA to propagate before
+# polling ready/state signals.
+#
+# WRONG (reads stale ready=1 from previous IDLE state):
+#   drive_inputs(dut, ...)
+#   while int(dut.ready.value) != 1:   # stale! DUT still in IDLE at this point
+#       await RisingEdge(dut.clk)
+#
+# CORRECT:
+#   drive_inputs(dut, ...)
+#   await RisingEdge(dut.clk)          # let NBA propagate: IDLE → CALC
+#   while int(dut.ready.value) != 1:   # now reads post-NBA CALC state
+#       await RisingEdge(dut.clk)
+#
+# This pattern applies to ANY multi-block/multi-operation test where the DUT
+# goes through state transitions between operations.
+
+
 # ─── VCD capture for cocotb ────────────────────────────────────────────
 # cocotb + iverilog does not automatically produce VCD. Enable it
 # so that vcd2table.py can analyze waveforms after simulation.

@@ -445,50 +445,8 @@ def get_test_vectors() -> list[dict]:
 if __name__ == "__main__":
     import sys
 
-    # === Interface Contract Validation (auto-injected, DO NOT EDIT) ===
-    print("=== Interface Contract Validation ===")
-    _contract_ok = True
-
-    # Check compute() signature
-    import inspect
-    _sig = inspect.signature(compute)
-    _params = list(_sig.parameters.keys())
-    if _params != ["inputs", "trace"]:
-        print(f"[FATAL] compute() signature mismatch: {_params} != ['inputs', 'trace']")
-        _contract_ok = False
-
-    # Check run() signature
-    _sig_run = inspect.signature(run)
-    _params_run = list(_sig_run.parameters.keys())
-    if _params_run != ["test_vector_index"]:
-        print(f"[FATAL] run() signature mismatch: {_params_run} != ['test_vector_index']")
-        _contract_ok = False
-
-    # Check get_test_vectors() signature
-    _sig_gtv = inspect.signature(get_test_vectors)
-    _params_gtv = list(_sig_gtv.parameters.keys())
-    if _params_gtv != []:
-        print(f"[FATAL] get_test_vectors() signature mismatch: {_params_gtv} != []")
-        _contract_ok = False
-
-    # Functional smoke: compute must accept dict input
-    try:
-        _tv0 = TEST_VECTORS[0]
-        _r = compute(_tv0["inputs"], trace=False)
-        if not isinstance(_r, dict):
-            print(f"[FATAL] compute(trace=False) must return dict, got {type(_r).__name__}")
-            _contract_ok = False
-    except Exception as _e:
-        print(f"[FATAL] compute() smoke test failed: {_e}")
-        _contract_ok = False
-
-    if _contract_ok:
-        print("[PASS] Interface contract OK")
-    else:
-        sys.exit(1)
-
     # Run cycle trace for vcd2table
-    print("\n=== Design Spec: cycle trace ===")
+    print("=== Design Spec: cycle trace ===")
     cycles = run(0)
     for i, entry in enumerate(cycles):
         parts = []

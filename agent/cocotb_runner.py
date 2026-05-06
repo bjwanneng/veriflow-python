@@ -29,6 +29,15 @@ import os
 import sys
 from pathlib import Path
 
+from agent.eda_paths import (
+    get_eda_bin,
+    get_eda_lib,
+    get_ivl_home,
+    get_python_exe,
+    get_yosys_exe,
+    build_subprocess_env,
+)
+
 # Default configuration
 DEFAULT_TIMEOUT_SECONDS = 300  # 5-minute simulation timeout
 
@@ -121,18 +130,70 @@ def main():
         print(f"[cocotb_runner] VCD       : {'enabled' if enable_vcd else 'disabled'}", file=sys.stderr)
         print(f"[cocotb_runner] Timeout   : {args.timeout}s", file=sys.stderr)
 
+    # ── Build clean PATH (Windows DLL pollution fix) ──────────────────
+    # On Windows with Git Bash, the PATH may contain Git's mingw64/bin
+    # which has conflicting DLLs (libstdc++, libgcc) that crash iverilog.
+    # Build a clean PATH that only includes EDA tools + system dirs.
+    clean_path = None
+    original_path = os.environ.get("PATH", "")
+    eda_bin = get_eda_bin()
+    if sys.platform == "win32" and eda_bin:
+        clean_path_parts = [eda_bin]
+        eda_lib = get_eda_lib()
+        if eda_lib:
+            for lib_dir in eda_lib.split(os.pathsep):
+                if lib_dir:
+                    clean_path_parts.append(lib_dir)
+        clean_path_parts.append(os.path.dirname(sys.executable))
+        windir = os.environ.get("WINDIR", r"C:\Windows")
+        clean_path_parts.append(os.path.join(windir, "System32"))
+        clean_path = os.pathsep.join(clean_path_parts)
+        # Temporarily set clean PATH for Icarus() init (which calls shutil.which)
+        os.environ["PATH"] = clean_path
+
     # ── Icarus Verilog runner ──────────────────────────────────────────
+    # Icarus.__init__ calls _simulator_in_path() which uses shutil.which("iverilog")
+    # This must find iverilog in the current process's PATH (set above).
     runner = Icarus()
 
-    # Build a minimal environment with only PATH and COCOTB settings.
-    # Avoid copying the full os.environ to prevent leaking sensitive
-    # environment variables (API keys, tokens) to subprocesses.
+    # Restore original PATH to avoid polluting the global process environment
+    if clean_path:
+        os.environ["PATH"] = original_path
+
+    # Build minimal environment for subprocesses using centralized path resolution
     runner.env = {}
-    for key in ("PATH", "SYSTEMROOT", "TEMP", "TMP", "HOME", "USERPROFILE",
-                "PYTHONPATH", "LD_LIBRARY_PATH", "EDA_BIN", "EDA_LIB",
-                "IVL_HOME", "IVL"):
+    if clean_path:
+        runner.env["PATH"] = clean_path
+    else:
+        # Use build_subprocess_env which adds EDA paths to PATH
+        runner.env["PATH"] = build_subprocess_env().get("PATH", original_path)
+
+    for key in ("SYSTEMROOT", "TEMP", "TMP", "HOME", "USERPROFILE",
+                "PYTHONPATH", "LD_LIBRARY_PATH", "COVERAGE_FILE",
+                "COVERAGE_PROCESS_START"):
         if key in os.environ:
             runner.env[key] = os.environ[key]
+
+    # Set EDA paths from centralized resolution (not from potentially-MSYS env vars)
+    eda_lib = get_eda_lib()
+    ivl_home = get_ivl_home()
+    yosys_exe = get_yosys_exe()
+    python_exe = get_python_exe()
+    if eda_bin:
+        runner.env["EDA_BIN"] = eda_bin
+    if eda_lib:
+        runner.env["EDA_LIB"] = eda_lib
+    if ivl_home:
+        runner.env["IVL_HOME"] = ivl_home
+        runner.env["IVL"] = ivl_home
+    if yosys_exe:
+        runner.env["YOSYS_EXE"] = yosys_exe
+    if python_exe:
+        runner.env["PYTHON_EXE"] = python_exe
+
+    # Force UTF-8 mode for Python subprocesses (critical on Chinese Windows
+    # where default encoding is GBK, causing UnicodeDecodeError on UTF-8 files)
+    runner.env["PYTHONUTF8"] = "1"
 
     # Set test timeout via environment variable (cocotb respects COCOTB_TIMEOUT)
     runner.env["COCOTB_TIMEOUT"] = str(args.timeout)
@@ -148,6 +209,7 @@ def main():
             build_dir=str(build_dir),
             build_args=[],
             waves=enable_vcd,
+            timescale=("1ns", "1ps"),
         )
     except Exception as e:
         print(json.dumps({

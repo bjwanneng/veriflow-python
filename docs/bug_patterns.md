@@ -825,3 +825,98 @@ operation result:
 2. If the difference is a constant XOR/ADD with the previous operation's value,
    the finalize state is using `accum_reg` instead of `init_val`
 3. Check: finalize uses `accum_reg` vs `init_val`
+
+---
+
+## Pattern 19: FSM Control Signal Timing Mismatch
+
+**Discovered in**: SM3 FSM module (registered control signals vs combinational golden model)
+
+**Class**: B (Timing) — but causes downstream Type A symptoms
+
+### Symptom
+
+Round counter appears off-by-one. Control signals (calc_en, load_en, update_v_en,
+hash_valid) assert one cycle too early or too late compared to the golden model.
+The design produces correct logic in isolation but wrong results due to cycle
+misalignment. Common manifestations:
+
+- `round_cnt` reaches MAX_ROUND one cycle early/late
+- `calc_en` leaks into DONE state, applying an extra computation round
+- `hash_valid` asserts one cycle off, breaking handshake timing
+- First-block result correct but multi-block results wrong
+
+### Root Cause
+
+The golden model (design_spec.py `compute()`) treats FSM control signals as
+**combinational** (immediate on state entry), but the Verilog implementation
+**registers** them (adding a 1-cycle delay). This shifts all downstream timing
+by one cycle.
+
+```python
+# Python golden model: calc_en is combinational (immediate)
+def compute(state, ...):
+    if state == CALC:
+        calc_en = 1   # active immediately in CALC state
+        # ... computation ...
+```
+
+```verilog
+// WRONG: registered control — 1 cycle delay
+always @(posedge clk) begin
+    if (state_reg == S_CALC)
+        calc_en_reg <= 1;  // not visible until NEXT posedge!
+end
+assign calc_en = calc_en_reg;
+
+// CORRECT: combinational control — matches golden model
+assign calc_en = (state_reg == S_CALC) && !load_en_reg;
+```
+
+The 1-cycle delay causes:
+- `round_cnt` increments one cycle late → off-by-one in round count
+- `calc_en` leaks into DONE state → extra computation round (Pattern 10)
+- `hash_valid` asserts one cycle late → wrong handshake timing
+
+### Two Valid Patterns
+
+**Pattern A — Combinational control** (default for `# wire` annotated signals):
+```verilog
+assign calc_en     = (state_reg == S_CALC) && !load_en_reg;
+assign update_v_en = (state_reg == S_DONE);
+assign hash_valid  = (state_reg == S_DONE) && is_last;
+```
+
+**Pattern B — Registered control** (ONLY for `# reg_next` annotated signals):
+```verilog
+always @(posedge clk) begin
+    calc_en_reg <= (state_reg == S_CALC) && !load_en_reg;
+end
+assign calc_en = calc_en_reg;  // 1-cycle delay from state transition
+```
+
+**MIXING IS FORBIDDEN**: If the golden model uses Pattern A timing, the Verilog
+MUST NOT use Pattern B for any related control signal. This is the #1 cause of
+round-counter offset bugs.
+
+### Fix
+
+Match the golden model's control signal timing pattern:
+1. Read `design_spec.py` `compute()` function
+2. Determine if control signals are combinational or registered
+3. Use the SAME pattern in Verilog for ALL related control signals
+4. Document the timing choice: `// combinational control — matches golden model`
+
+### Prevention
+
+**codegen stage (Rule R7)**: When translating FSM control signals:
+1. Read the golden model's `compute()` function carefully
+2. Determine if control signals are combinational (set in same cycle as state)
+   or registered (delayed by 1 cycle)
+3. Use the SAME pattern in Verilog — combinational `assign` or registered `<=`
+4. **MIXING IS FORBIDDEN** — all related signals must use the same pattern
+
+**verify_fix stage**: When round counter or control timing is wrong:
+1. Check if the golden model uses combinational or registered control
+2. Compare Verilog implementation — if mismatched, this is Pattern 19
+3. Fix: change ALL related control signals to match the golden model's timing

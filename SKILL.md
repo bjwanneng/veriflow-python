@@ -53,7 +53,7 @@ source "$PROJECT_DIR/.veriflow/eda_env.sh" && $PYTHON_EXE "${CLAUDE_SKILL_DIR}/s
 ```bash
 source "$PROJECT_DIR/.veriflow/eda_env.sh" && $PYTHON_EXE "${CLAUDE_SKILL_DIR}/skill/state.py" "$PROJECT_DIR" "<STAGE>" --hook="<HOOK_CMD>" --journal-outputs="<FILES>" --journal-notes="<NOTES>"
 ```
-Then: `TaskUpdate` mark the stage task as completed.
+Then: `TaskUpdate` mark the stage task (matched by subject prefix `[S<n>]`) as completed.
 
 ---
 
@@ -67,6 +67,24 @@ See `${CLAUDE_SKILL_DIR}/docs/design_rules.md` for full rules.
 - Interface Lock: port names, handshake protocols, and module hierarchy are frozen after Stage 1
 
 ---
+
+## Canonical Inputs (after Stage 0)
+
+Once Stage 0 completes, the ONLY canonical inputs for Stages 1–4 are:
+- `.veriflow/clarifications.md` — extracted requirements
+- `workspace/docs/design_spec.py` — spec + golden model + blueprint (from Stage 1 onward)
+- `.veriflow/pipeline_context.json` — cross-stage metadata (design name, modules, ports, file paths)
+
+Do NOT re-read `requirement.md`, `constraints.md`, or `context/*.md` after Stage 0.
+Sub-agents receive file paths and read files themselves — the main session does NOT read docs files on their behalf.
+
+## Stage Gate (context optimization)
+
+Between stages, minimize context carry-over:
+
+1. **Before reading the next stage file**, write a one-paragraph summary of the completed stage to `.veriflow/stage_summaries.md` (append mode).
+2. **Stage summaries replace old context** — if you need to recall a prior stage's result, read `.veriflow/stage_summaries.md` or `.veriflow/pipeline_context.json`, NOT the stage file or conversation history.
+3. **Stage instruction files are single-use** — once a stage completes, its `.md` file should not be referenced again.
 
 ## Execution
 

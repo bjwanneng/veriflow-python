@@ -24,13 +24,13 @@ import argparse
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 # Shared golden model loader (also used by vcd2table.py)
 from agent.golden_loader import load_golden_cycles, run_golden_self_check
+from agent.eda_paths import find_executable, build_subprocess_env
 
 
 # Truncation limits for output (avoid flooding JSON result)
@@ -40,29 +40,14 @@ _MAX_GOLDEN_OUTPUT = 2000
 _MAX_FAILURES_SHOWN = 10
 
 
-def _find_executable(names: list[str], env_var: str = "EDA_BIN") -> str:
-    """Find an executable by name, checking env_var directory then PATH."""
-    eda_bin = os.environ.get(env_var, "")
-    if eda_bin:
-        for name in names:
-            p = Path(eda_bin) / name
-            if p.exists():
-                return str(p)
-    for name in names:
-        found = shutil.which(name)
-        if found:
-            return found
-    return ""
-
-
 def find_iverilog() -> str:
     """Find iverilog executable."""
-    return _find_executable(["iverilog", "iverilog.exe"])
+    return find_executable(["iverilog", "iverilog.exe"])
 
 
 def find_vvp() -> str:
     """Find vvp executable."""
-    return _find_executable(["vvp", "vvp.exe"])
+    return find_executable(["vvp", "vvp.exe"])
 
 
 def collect_rtl_sources(rtl_dir: Path) -> list[str]:
@@ -316,13 +301,8 @@ def main():
     if args.verbose:
         print(f"[iverilog_runner] Compile cmd: {' '.join(compile_cmd)}", file=sys.stderr)
 
-    # Ensure EDA binary/lib paths are in PATH for DLL resolution on Windows.
-    sim_env = os.environ.copy()
-    eda_bin = os.environ.get("EDA_BIN", "")
-    eda_lib = os.environ.get("EDA_LIB", "")
-    extra_paths = os.pathsep.join(p for p in [eda_bin, eda_lib] if p)
-    if extra_paths:
-        sim_env["PATH"] = extra_paths + os.pathsep + sim_env.get("PATH", "")
+    # Build subprocess env with EDA paths (EDA_BIN, EDA_LIB, IVL_HOME, etc.)
+    sim_env = build_subprocess_env()
     try:
         result = subprocess.run(
             compile_cmd,

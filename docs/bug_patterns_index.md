@@ -22,6 +22,7 @@ Match symptoms below, then Read the full pattern from `bug_patterns.md` header `
 | 16 | Wire-Output Registered | Codegen | Submodule output 1 cycle late; `# wire` implemented as `output reg` | `## Pattern 16` |
 | 17 | Variable Part-Select V2005 | Codegen | Compile error or wrong ROL with variable shift | `## Pattern 17` |
 | 18 | Init-Value Consistency | Logic | 2nd+ operation wrong; finalize uses `accum_reg` not `init_val` | `## Pattern 18` |
+| 19 | FSM Control Signal Timing | Timing | Round counter off-by-one; control signals 1 cycle early/late | `## Pattern 19` |
 
 ## Classification Quick Guide
 
@@ -38,3 +39,4 @@ Match symptoms below, then Read the full pattern from `bug_patterns.md` header `
 - **Output off by one round of computation**: Pattern 10
 - **Valid fires too early**: Pattern 14
 - **ROL/ROR produces wrong result**: Pattern 13, 17
+- **Round counter off-by-one, control timing wrong**: Pattern 19

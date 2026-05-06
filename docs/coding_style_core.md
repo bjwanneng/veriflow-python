@@ -187,3 +187,30 @@ end
 
 - Named port connections only (no positional)
 - All ports must appear; unused: `.port()` or `.port(8'd0)`
+
+---
+
+## C14. FSM Control Signal Timing [MUST]
+
+Control signals (calc_en, load_en, done, valid, etc.) MUST match the golden
+model's timing model. Two valid patterns — **mixing is forbidden**.
+
+| Golden model pattern | Verilog implementation |
+|---------------------|----------------------|
+| Signal set in same cycle as state transition | `assign signal = (state_reg == STATE);` (combinational) |
+| Signal delayed by 1 cycle from state transition | `always @(posedge clk) signal <= condition;` (registered) |
+
+```verilog
+// Pattern A — Combinational control (default for # wire annotated signals)
+assign calc_en    = (state_reg == S_CALC) && !load_en_reg;
+assign hash_valid = (state_reg == S_DONE) && is_last;
+
+// Pattern B — Registered control (ONLY for # reg_next annotated signals)
+always @(posedge clk) begin
+    calc_en_reg <= (state_reg == S_CALC) && !load_en_reg;
+end
+assign calc_en = calc_en_reg;
+```
+
+**Rule**: If golden model sets signals immediately on state entry → all related
+signals use `assign`. If delayed → all use registered. Mixing causes Pattern 19.

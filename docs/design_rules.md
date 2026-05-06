@@ -86,3 +86,36 @@ wire [W-1:0] result = accum_reg ^ work_out;
 selected at the start of the operation (`init_val = is_first ? CONST : accum_reg`),
 not the raw storage register. This ensures correct behavior for both first-operation
 (is_first=1 → CONST) and continuation (is_first=0 → accum_reg) cases.
+
+## Data-Control Alignment `[CRITICAL]`
+
+Data output signals and their associated valid/ready control signals MUST be
+timing-aligned — they must be either BOTH combinational or BOTH registered
+relative to the same FSM state.
+
+**The problem**: When `valid` is combinational (`assign valid = (state == DONE)`)
+but `data_out` is registered (`data_out <= result`), the valid signal fires
+one cycle BEFORE the data is ready. The consumer samples stale/wrong data.
+
+**Two valid patterns**:
+
+```verilog
+// Pattern A: BOTH combinational (valid and data active in same cycle)
+assign hash_valid = (state_reg == S_DONE) && is_last_reg;
+assign hash_out   = update_v_en ? {V_reg ^ A_reg, ...} : {V_reg, ...};
+
+// Pattern B: BOTH registered (valid and data both delayed 1 cycle)
+always @(posedge clk) begin
+    hash_valid_reg <= (state_reg == S_DONE) && is_last_reg;
+    hash_out_reg   <= {V_reg ^ A_reg, ...};
+end
+assign hash_valid = hash_valid_reg;
+assign hash_out   = hash_out_reg;
+```
+
+**FORBIDDEN**: Mixing — combinational valid + registered data, or vice versa.
+
+**How to verify**: Check that every `(valid/ready)_out` signal and its paired
+`data_out` signal have the same delay relative to the FSM state that produces them.
+If `valid` is `assign` from `state_reg`, then `data_out` MUST also be readable
+from `state_reg` (not from a `_next` wire that updates next cycle).
