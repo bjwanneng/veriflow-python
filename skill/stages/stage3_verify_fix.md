@@ -209,6 +209,9 @@ reviewed but are not blocking.
 ## Cocotb per-cycle verification (if available)
 
 ```bash
+COCOTB_EXIT=0
+COCOTB_FAILED=0
+COCOTB_PASSED=0
 if $PYTHON_EXE -c "import cocotb" 2>/dev/null; then
     cd "$PROJECT_DIR"
     TOP_MODULE=$($PYTHON_EXE -c "
@@ -222,7 +225,39 @@ print(mod.__dict__.get('DESIGN_NAME', os.path.basename(os.getcwd())))
         --rtl-dir workspace/rtl --tb-dir workspace/tb \
         --module $TOP_MODULE --build-dir workspace/sim \
         --verbose > logs/cocotb.log 2>&1
-    echo "Cocotb: $(tail -1 logs/cocotb.log)"
+    COCOTB_EXIT=$?
+    # Extract pass/fail counts from cocotb JSON output (last line)
+    COCOTB_FAILED=$($PYTHON_EXE -c "
+import json, sys
+try:
+    with open('logs/cocotb.log') as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith('{'):
+                data = json.loads(line)
+                if 'failed' in data:
+                    print(data['failed'])
+                    break
+except Exception:
+    print(0)
+" 2>/dev/null || echo 0)
+    COCOTB_PASSED=$($PYTHON_EXE -c "
+import json, sys
+try:
+    with open('logs/cocotb.log') as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith('{'):
+                data = json.loads(line)
+                if 'passed' in data:
+                    print(data['passed'])
+                    break
+except Exception:
+    print(0)
+" 2>/dev/null || echo 0)
+    echo "Cocotb: exit=$COCOTB_EXIT passed=$COCOTB_PASSED failed=$COCOTB_FAILED"
+else
+    echo "Cocotb: not available (skipping per-cycle verification)"
 fi
 ```
 
@@ -250,8 +285,48 @@ echo "Simulation: $(tail -1 logs/sim.log)"
 
 ## If PASS
 
+Check BOTH cocotb per-cycle results AND iverilog simulation results.
+
 ```bash
-$PYTHON_EXE "${CLAUDE_SKILL_DIR}/skill/state.py" "$PROJECT_DIR" "verify_fix" --hook="$PYTHON_EXE -c \"import sys; sys.exit(0 if 'ALL TESTS PASSED' in open('logs/sim.log').read() else 1)\"" --journal-outputs="logs/sim.log" --journal-notes="Simulation passed"
+SIM_PASSED=false
+COCOTB_PASSED=true
+
+# Check iverilog simulation
+if grep -q "ALL TESTS PASSED" logs/sim.log 2>/dev/null; then
+    SIM_PASSED=true
+fi
+
+# Check cocotb (re-read log — variables from previous blocks don't persist)
+if [ -f logs/cocotb.log ]; then
+    COCOTB_FAILED=$($PYTHON_EXE -c "
+import json
+try:
+    for line in open('logs/cocotb.log'):
+        line = line.strip()
+        if line.startswith('{'):
+            data = json.loads(line)
+            if 'failed' in data:
+                print(data['failed'])
+                break
+except Exception:
+    print(0)
+" 2>/dev/null || echo 0)
+    if [ "$COCOTB_FAILED" -gt 0 ] 2>/dev/null; then
+        COCOTB_PASSED=false
+    fi
+fi
+
+if $SIM_PASSED && $COCOTB_PASSED; then
+    $PYTHON_EXE "${CLAUDE_SKILL_DIR}/skill/state.py" "$PROJECT_DIR" "verify_fix" --hook="echo ALL_PASSED" --journal-outputs="logs/sim.log logs/cocotb.log" --journal-notes="Simulation + cocotb per-cycle passed"
+else
+    if ! $SIM_PASSED; then
+        echo "[FAIL] iverilog simulation failed"
+    fi
+    if ! $COCOTB_PASSED; then
+        echo "[FAIL] cocotb per-cycle verification failed — see logs/cocotb.log"
+    fi
+    exit 1
+fi
 ```
 
 Update pipeline context:
@@ -265,13 +340,104 @@ cat >> "$PROJECT_DIR/.veriflow/stage_summaries.md" << 'EOF'
 
 ## Stage 3 — verify_fix
 - Simulation: ALL TESTS PASSED
-- Logs: logs/sim.log
+- Cocotb per-cycle: PASSED
+- Logs: logs/sim.log, logs/cocotb.log
 EOF
 ```
 
 TaskUpdate complete. Go to Stage 4.
 
 ## If FAIL — Automated Bug Classification
+
+### Determine failure source(s)
+
+```bash
+FAIL_SOURCE=""
+# Check cocotb (re-read log — variables from previous blocks don't persist)
+if [ -f logs/cocotb.log ]; then
+    COCOTB_FAILED=$($PYTHON_EXE -c "
+import json
+try:
+    for line in open('logs/cocotb.log'):
+        line = line.strip()
+        if line.startswith('{'):
+            data = json.loads(line)
+            if 'failed' in data:
+                print(data['failed'])
+                break
+except Exception:
+    print(0)
+" 2>/dev/null || echo 0)
+    if [ "$COCOTB_FAILED" -gt 0 ] 2>/dev/null; then
+        FAIL_SOURCE="${FAIL_SOURCE}cocotb "
+    fi
+fi
+if ! grep -q "ALL TESTS PASSED" logs/sim.log 2>/dev/null; then
+    FAIL_SOURCE="${FAIL_SOURCE}iverilog"
+fi
+echo "Failure source(s): $FAIL_SOURCE"
+```
+
+### Cocotb failure detail extraction (if cocotb failed)
+
+```bash
+if echo "$FAIL_SOURCE" | grep -q "cocotb"; then
+    echo "=== COCOTB PER-CYCLE FAILURES ==="
+    $PYTHON_EXE -c "
+import json, sys
+try:
+    with open('logs/cocotb.log') as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith('{'):
+                data = json.loads(line)
+                if 'failures' in data:
+                    print(f'Cocotb tests: {data.get(\"tests\", 0)} total, '
+                          f'{data.get(\"passed\", 0)} passed, '
+                          f'{data.get(\"failed\", 0)} failed')
+                    for failure in data.get('failures', []):
+                        test_name = failure.get('test', 'unknown')
+                        msg = failure.get('message', '')
+                        tb = failure.get('traceback', '')
+                        print(f'  [{test_name}] {msg}')
+                        if tb:
+                            # Extract cycle/signal info from traceback
+                            for tb_line in tb.split(chr(10)):
+                                if 'cycle=' in tb_line or 'signal=' in tb_line:
+                                    print(f'    {tb_line.strip()[:200]}')
+                    break
+except Exception as e:
+    print(f'Failed to parse cocotb log: {e}')
+"
+    echo ""
+    # Extract per-cycle divergence details for A/B/D classification
+    $PYTHON_EXE -c "
+import re, sys
+
+with open('logs/cocotb.log') as f:
+    content = f.read()
+
+# Parse [LAYERED] and [INTERNAL] failure messages
+for pattern in [r'\[LAYERED\].*?FIRST DIVERGENCE.*', r'\[INTERNAL\].*?FIRST DIVERGENCE.*']:
+    for m in re.finditer(pattern, content):
+        print(m.group(0)[:300])
+
+# Parse structured divergence data
+for m in re.finditer(r'cycle=(\d+)\s+signal=(\S+)\s+expected=(0x[0-9a-fA-F]+)\s+got=(0x[0-9a-fA-F]+)', content):
+    cycle, sig, exp, act = m.groups()
+    exp_int = int(exp, 16)
+    act_int = int(act, 16)
+    # Classify
+    if act_int == 0 and exp_int != 0:
+        cls = 'D'
+    elif act_int != 0:
+        cls = 'A'
+    else:
+        cls = 'A'
+    print(f'[COCOTB] cls={cls} cycle={cycle} signal={sig} expected={exp} actual={act}')
+" 2>&1
+fi
+```
 
 The iverilog_runner produces structured failure classification using the golden
 model. Read the JSON output from `logs/sim.log` to get:
@@ -293,7 +459,38 @@ Use the classification to narrow down bug patterns:
 ### Step-by-Step Failure Diagnosis
 
 1. **Read classification results**: Extract first failure's classification and reasoning
+   from BOTH cocotb and iverilog logs.
    ```bash
+   # Check cocotb log first (per-cycle comparison is more precise)
+   echo "--- Cocotb per-cycle results ---"
+   $PYTHON_EXE -c "
+   import json, sys
+   cocotb_failures = []
+   try:
+       for line in open('logs/cocotb.log'):
+           line = line.strip()
+           if line.startswith('{'):
+               try:
+                   data = json.loads(line)
+                   if 'failures' in data and data['failures']:
+                       cocotb_failures = data['failures']
+                       break
+               except: pass
+   except FileNotFoundError:
+       print('Cocotb log not found — cocotb did not run')
+       sys.exit(0)
+   
+   if cocotb_failures:
+       for f in cocotb_failures[:3]:
+           test = f.get('test', '?')
+           msg = f.get('message', '')[:200]
+           print(f'  [{test}] {msg}')
+   else:
+       print('  No cocotb failures (cocotb passed)')
+   "
+   
+   echo ""
+   echo "--- Iverilog simulation results ---"
    $PYTHON_EXE -c "
    import json, sys
    for line in open('logs/sim.log'):
@@ -321,9 +518,31 @@ Use the classification to narrow down bug patterns:
 2. **Read bug patterns (lazy-load)**: Based on classification, extract ONLY
    the relevant patterns — do NOT read the entire bug_patterns.md:
    ```bash
-   # Determine pattern numbers from classification
+   # Determine classification from EITHER cocotb or iverilog logs
    CLASSIFICATION=$($PYTHON_EXE -c "
    import json, sys
+   # Check cocotb first (more precise per-cycle classification)
+   try:
+       for line in open('logs/cocotb.log'):
+           line = line.strip()
+           if line.startswith('{'):
+               try:
+                   data = json.loads(line)
+                   if 'failures' in data and data['failures']:
+                       msg = str(data['failures'][0].get('message', ''))
+                       # Extract classification from cocotb message
+                       if 'bug_type=A' in msg or 'data-wrong' in msg:
+                           print('A'); sys.exit(0)
+                       elif 'bug_type=B' in msg:
+                           print('B'); sys.exit(0)
+                       elif 'bug_type=D' in msg:
+                           print('D'); sys.exit(0)
+                       elif 'register stuck' in msg or 'uninitialized' in msg:
+                           print('D'); sys.exit(0)
+                       break
+               except: pass
+   except FileNotFoundError: pass
+   # Fallback to iverilog log
    for line in open('logs/sim.log'):
        line = line.strip()
        if line.startswith('{'):
@@ -357,10 +576,16 @@ Use the classification to narrow down bug patterns:
    head -20 "${CLAUDE_SKILL_DIR}/docs/error_recovery.md"
    ```
 
-4. **Collect data**: Extract relevant portions of `logs/sim.log` (do NOT read
+4. **Collect data**: Extract relevant portions of BOTH log files (do NOT read
    the entire file):
    ```bash
-   # Show only failure-related lines
+   # Cocotb per-cycle failure details (most precise)
+   if [ -f logs/cocotb.log ]; then
+       echo "=== Cocotb failures ==="
+       grep -E '(FAIL|DIVERGENCE|cycle=|signal=|expected=|bug_type)' logs/cocotb.log | head -20
+   fi
+   # Iverilog simulation failure details
+   echo "=== Iverilog failures ==="
    grep -E '(FAIL|Error|mismatch|expected|actual|cycle)' logs/sim.log | head -30
    ```
    Check VCD waveform if available, examine the RTL module at the failure point.
