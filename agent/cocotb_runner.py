@@ -172,8 +172,8 @@ def main() -> int:
             runner.env["PATH"] = build_subprocess_env().get("PATH", original_path)
 
         for key in ("SYSTEMROOT", "TEMP", "TMP", "HOME", "USERPROFILE",
-                    "PYTHONPATH", "LD_LIBRARY_PATH", "COVERAGE_FILE",
-                    "COVERAGE_PROCESS_START"):
+                    "PYTHONPATH", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH",
+                    "COVERAGE_FILE", "COVERAGE_PROCESS_START"):
             if key in os.environ:
                 runner.env[key] = os.environ[key]
 

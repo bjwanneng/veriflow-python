@@ -79,7 +79,7 @@ def discover_python() -> str:
                 candidates.append(str(p))
     # Unix locations (harmless on Windows — paths won't exist)
     if sys.platform != "win32":
-        for d in ("/usr/bin", "/usr/local/bin"):
+        for d in ("/opt/homebrew/bin", "/usr/bin", "/usr/local/bin"):
             p = Path(d) / "python3"
             if p.exists():
                 candidates.append(str(p))
@@ -133,11 +133,13 @@ def discover_eda() -> tuple[str, str]:
         ])
     else:
         search_dirs.extend([
+            "/opt/homebrew",        # macOS Apple Silicon (Homebrew default)
             "/opt/oss-cad-suite",
-            "/usr/local",
+            "/usr/local",           # macOS Intel / Linux
             "/usr",
         ])
     search_dirs.append(os.path.expanduser("~/.local"))
+    search_dirs.append(os.path.expanduser("~/oss-cad-suite"))
 
     for base in search_dirs:
         base_path = Path(base)
@@ -179,9 +181,11 @@ def verify_iverilog(iverilog_path: str) -> tuple[bool, str]:
     if not iverilog_path:
         return False, "iverilog path is empty"
     try:
+        from agent.eda_paths import build_subprocess_env
         result = subprocess.run(
             [iverilog_path, "-V"],
             capture_output=True, text=True, timeout=10,
+            env=build_subprocess_env(),
         )
         if result.returncode == 0:
             version = (result.stdout + result.stderr).split("\n")[0]
@@ -192,7 +196,7 @@ def verify_iverilog(iverilog_path: str) -> tuple[bool, str]:
         return False, f"iverilog not found at {iverilog_path}"
     except OSError as e:
         # On Windows, this catches DLL loading failures (e.g., 0xC0000139)
-        return False, f"Cannot execute iverilog (DLL/library error?): {e}"
+        return False, f"Cannot execute iverilog (shared library error?): {e}"
     except subprocess.TimeoutExpired:
         return False, "iverilog -V timed out"
 
@@ -230,10 +234,12 @@ def smoke_test_vvp(iverilog_path: str, timeout: int = 15) -> tuple[bool, str]:
         tb_file.write_text(smoke_tb)
 
         try:
+            from agent.eda_paths import build_subprocess_env
+            smoke_env = build_subprocess_env()
             comp = subprocess.run(
                 [iverilog_path, "-o", str(vvp_file), str(tb_file)],
                 capture_output=True, text=True, timeout=10,
-                cwd=tmpdir,
+                cwd=tmpdir, env=smoke_env,
             )
             if comp.returncode != 0:
                 return False, f"Smoke compile failed: {comp.stderr[:200]}"
@@ -244,7 +250,7 @@ def smoke_test_vvp(iverilog_path: str, timeout: int = 15) -> tuple[bool, str]:
             sim = subprocess.run(
                 [vvp_path, str(vvp_file)],
                 capture_output=True, text=True, timeout=timeout,
-                cwd=tmpdir,
+                cwd=tmpdir, env=smoke_env,
             )
             if sim.returncode != 0:
                 return False, f"vvp exited code {sim.returncode}: {(sim.stderr or '')[:200]}"
@@ -254,7 +260,7 @@ def smoke_test_vvp(iverilog_path: str, timeout: int = 15) -> tuple[bool, str]:
         except FileNotFoundError:
             return False, f"vvp not found at {vvp_path}"
         except OSError as e:
-            return False, f"Cannot execute vvp (DLL/library error?): {e}"
+            return False, f"Cannot execute vvp (shared library error?): {e}"
         except subprocess.TimeoutExpired:
             return False, f"vvp smoke test timed out after {timeout}s (possible runtime error)"
 
@@ -287,7 +293,7 @@ def discover_yosys(eda_bin_hint: str = "") -> str:
     if sys.platform == "win32":
         bases.append(r"C:\oss-cad-suite")
     else:
-        bases.extend(["/opt/oss-cad-suite", "/usr/local", "/usr"])
+        bases.extend(["/opt/homebrew", "/opt/oss-cad-suite", "/usr/local", "/usr"])
     for base in bases:
         for name in ("yosys", "yosys.exe"):
             p = Path(base) / "bin" / name
@@ -516,6 +522,20 @@ def main():
                 print("[HINT] Ensure EDA_LIB directories are on PATH for Windows DLL resolution")
             else:
                 print("[WARN] No DLLs found near iverilog — may fail on Windows")
+
+    # macOS shared library check
+    if sys.platform == "darwin" and eda_bin:
+        eda_base = str(Path(eda_bin).parent)
+        dylib_dirs = []
+        for lib_dir_str in (eda_lib.split(os.pathsep) if eda_lib else []):
+            lib_dir = Path(lib_dir_str)
+            if lib_dir.is_dir() and (list(lib_dir.glob("*.dylib")) or list(lib_dir.glob("*.so"))):
+                dylib_dirs.append(str(lib_dir))
+        if dylib_dirs:
+            print(f"[ENV] Shared libraries found in: {dylib_dirs}")
+        elif eda_lib:
+            print(f"[WARN] EDA_LIB set but no .dylib/.so found — vvp may fail to start")
+            print(f"[HINT] Set DYLD_LIBRARY_PATH={eda_lib} or install via Homebrew: brew install iverilog")
 
     # Check existing state
     state_path = veriflow_dir / "pipeline_state.json"

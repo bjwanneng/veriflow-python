@@ -119,8 +119,9 @@ _EDA_SEARCH_DIRS_WIN = [
 ]
 
 _EDA_SEARCH_DIRS_UNIX = [
+    "/opt/homebrew",        # macOS Apple Silicon (Homebrew default)
     "/opt/oss-cad-suite",
-    "/usr/local",
+    "/usr/local",           # macOS Intel / Linux
     "/usr",
 ]
 
@@ -133,6 +134,7 @@ def _discover_eda() -> tuple[str, str]:
     else:
         search_dirs.extend(_EDA_SEARCH_DIRS_UNIX)
     search_dirs.append(os.path.expanduser("~/.local"))
+    search_dirs.append(os.path.expanduser("~/oss-cad-suite"))
 
     for base in search_dirs:
         base_path = Path(base)
@@ -176,7 +178,7 @@ def _discover_yosys(eda_bin: str = "") -> str:
     bases = (
         [r"C:\oss-cad-suite"]
         if sys.platform == "win32"
-        else ["/opt/oss-cad-suite", "/usr/local", "/usr"]
+        else ["/opt/homebrew", "/opt/oss-cad-suite", "/usr/local", "/usr"]
     )
     for base in bases:
         for name in ("yosys", "yosys.exe"):
@@ -356,17 +358,19 @@ def find_executable(names: list[str]) -> str:
 
 
 def build_subprocess_env(base_env: dict | None = None) -> dict:
-    """Build subprocess env with EDA paths set for DLL / library resolution.
+    """Build subprocess env with EDA paths set for shared library resolution.
 
     Sets EDA_BIN, EDA_LIB, IVL_HOME, YOSYS_EXE, PYTHON_EXE and prepends
     EDA directories to PATH so that child processes can locate tools and
-    their runtime dependencies (DLLs on Windows, .so on Linux).
+    their runtime dependencies (.dll on Windows, .so on Linux, .dylib on macOS).
+
+    On macOS, also sets DYLD_LIBRARY_PATH for shared library resolution.
 
     Args:
         base_env: Base dict (defaults to os.environ.copy()).
 
     Returns:
-        New env dict — safe to pass to subprocess.run(env=…).
+        New env dict — safe to pass to subprocess.run(env=...).
     """
     env = dict(base_env) if base_env else dict(os.environ)
 
@@ -392,5 +396,14 @@ def build_subprocess_env(base_env: dict | None = None) -> dict:
     extra = os.pathsep.join(p for p in [eda_bin] + lib_dirs if p)
     if extra:
         env["PATH"] = extra + os.pathsep + env.get("PATH", "")
+
+    # macOS: set DYLD_LIBRARY_PATH for shared library resolution
+    if sys.platform == "darwin" and lib_dirs:
+        dyld = os.pathsep.join(lib_dirs)
+        existing = env.get("DYLD_LIBRARY_PATH", "")
+        if existing:
+            env["DYLD_LIBRARY_PATH"] = dyld + os.pathsep + existing
+        else:
+            env["DYLD_LIBRARY_PATH"] = dyld
 
     return env
