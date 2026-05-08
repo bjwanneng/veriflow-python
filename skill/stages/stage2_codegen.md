@@ -205,7 +205,16 @@ for name, fn in inspect.getmembers(mod, inspect.isfunction):
 
 ## Standard AI Translation Path
 
-Dispatch ALL agents in parallel:
+### Phase 1: Generate Leaf Modules (parallel)
+
+Determine module dependency order from MODULE_HIERARCHY:
+- **Leaf modules**: NOT listed as keys in MODULE_HIERARCHY (or have empty submodules list). These have no user-defined sub-instances.
+- **Parent modules**: Listed as keys in MODULE_HIERARCHY with non-empty submodules.
+
+If MODULE_HIERARCHY is not defined in design_spec.py, fall back to generating ALL modules in parallel (legacy behavior).
+
+Dispatch **leaf module agents** in parallel:
+
 
 - **One vf-coder per module** (subagent_type: general-purpose)
   - **AGENT DISCIPLINE**: You are a sub-agent under [S2]. Create one subtask per module with prefix [S2.rtl] (e.g. `[S2.rtl] Codegen <module_name>`), set addBlockedBy to PARENT_TASK_ID. Mark in_progress when starting, completed when done. DO NOT create tasks for other stages.
@@ -227,10 +236,68 @@ Dispatch ALL agents in parallel:
   - **OUTPUT DISCIPLINE**: On completion, report ONLY: Status (SUCCESS/FAIL), Files written (paths), Summary (1-2 sentences), Errors (only if FAIL). DO NOT output file contents in your response.
   - Prompt includes: PARENT_TASK_ID, PROJECT_DIR, DESIGN_NAME, design_spec.py **path** (agent reads it itself), COCOTB_AVAILABLE flag, templates path
 
-After ALL return, verify outputs:
+After Phase 1 agents return, verify leaf module outputs:
+```bash
+ls "$PROJECT_DIR/workspace/rtl/"*.v 2>/dev/null
+```
+
+### Phase 1.5: Extract Ports + Generate Instance Code
+
+After leaf modules are generated, extract their actual Verilog port
+declarations and generate instance code from MODULE_HIERARCHY:
+
+```bash
+source "$PROJECT_DIR/.veriflow/eda_env.sh"
+cd "$PROJECT_DIR"
+
+# Step A: Check MODULE_HIERARCHY consistency
+$PYTHON_EXE "${CLAUDE_SKILL_DIR}/agent/hierarchy_check.py" workspace/docs/design_spec.py --verbose
+
+# Step B: Extract actual ports from generated Verilog
+$PYTHON_EXE "${CLAUDE_SKILL_DIR}/agent/instance_gen.py" \
+    --rtl-dir workspace/rtl \
+    --extract > workspace/docs/module_ports.json
+
+# Step C: Generate instance code from MODULE_HIERARCHY
+$PYTHON_EXE "${CLAUDE_SKILL_DIR}/agent/instance_gen.py" \
+    --rtl-dir workspace/rtl \
+    --hierarchy workspace/docs/design_spec.py \
+    --code > workspace/docs/instance_code.v
+```
+
+If MODULE_HIERARCHY does not exist, generate templates instead:
+```bash
+$PYTHON_EXE "${CLAUDE_SKILL_DIR}/agent/instance_gen.py" \
+    --rtl-dir workspace/rtl \
+    --template > workspace/docs/instance_templates.v
+```
+
+### Phase 2: Generate Parent Modules (with instance code injected)
+
+Dispatch **parent module agents** — each agent receives the auto-generated
+instance code as part of its prompt:
+
+- **One vf-coder per parent module** (subagent_type: general-purpose)
+  - Same constraints as Phase 1 agents, PLUS:
+  - **INSTANCE CONSTRAINT**: Copy the instance code from `workspace/docs/instance_code.v`
+    (or `instance_templates.v` if MODULE_HIERARCHY is absent) into the module's
+    Verilog file. DO NOT rewrite instance port connections from memory.
+    The instance code is auto-generated from actual Verilog port declarations —
+    it is guaranteed correct. Only fill in signal names if using templates.
+  - Prompt MUST include the contents of `instance_code.v` (or `instance_templates.v`)
+    in the INSTANTIATION section.
+
+After Phase 2 agents return, verify all outputs:
 ```bash
 ls "$PROJECT_DIR/workspace/rtl/"*.v "$PROJECT_DIR/workspace/tb/"*.v "$PROJECT_DIR/workspace/tb/"*.py 2>/dev/null
 ```
+
+### Fallback: No MODULE_HIERARCHY (Legacy Parallel Mode)
+
+If MODULE_HIERARCHY is not defined in design_spec.py, fall back to the
+original parallel generation mode: dispatch ALL module agents simultaneously,
+each receiving instance templates (not code) from `instance_gen.py --template`.
+This is less reliable but maintains backward compatibility.
 
 ## Port Consistency Validation (Post-Agent Check)
 
@@ -285,6 +352,35 @@ else:
 ```
 
 If port consistency fails, the offending module must be fixed before proceeding.
+
+## Automated RTL Verification (Post-Agent Check)
+
+Run `rtl_checker.py` to catch port mismatches, reset strategy violations,
+output reg violations, and testbench race conditions:
+
+```bash
+source "$PROJECT_DIR/.veriflow/eda_env.sh"
+cd "$PROJECT_DIR"
+
+# Detect reset strategy from design_spec.py
+RESET_STRATEGY=$($PYTHON_EXE -c "
+import importlib.util, re, sys
+spec = importlib.util.spec_from_file_location('ds', 'workspace/docs/design_spec.py')
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+content = open('workspace/docs/design_spec.py').read()
+m = re.search(r'Reset strategy:\s*(\w+)', content)
+print(m.group(1) if m else 'synchronous')
+" 2>/dev/null || echo "synchronous")
+
+$PYTHON_EXE "${CLAUDE_SKILL_DIR}/agent/rtl_checker.py" \
+    --rtl-dir workspace/rtl \
+    --tb-dir workspace/tb \
+    --reset-strategy "$RESET_STRATEGY" \
+    --verbose
+```
+
+If errors found, fix before proceeding to Stage 3.
 
 ## Syntax Verification (before Stage 3)
 

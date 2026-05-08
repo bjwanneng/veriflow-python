@@ -66,14 +66,71 @@ Return Timing Annotations (CRITICAL for codegen):
 # );
 
 # ============================================================
-# Section 2: Module Hierarchy
+# Section 2: Module Hierarchy + Interface Connections
 # ============================================================
-# List all modules and their roles.
+# Declare module hierarchy AND the exact port-to-port wiring between
+# modules. This serves as the single source of truth for Stage 2
+# codegen — the instance code is generated FROM this declaration,
+# not guessed by the AI agent.
 #
-# <top_module> (top)
-#   ├── <submodule_1> (control)   -- FSM, round counter, accumulator
-#   ├── <submodule_2> (processing) -- data expansion, shift register
-#   └── <submodule_3> (processing) -- compression datapath, A-H registers
+# Format:
+#   MODULE_HIERARCHY = {
+#       "parent_module": {
+#           "submodules": [
+#               {
+#                   "instance_name": "u_sub0",
+#                   "module": "sub_module_name",
+#                   "connections": {
+#                       "sub_port_name": "parent_signal",
+#                       # One connection per port in the submodule declaration.
+#                       # Port names MUST match the submodule's Python function
+#                       # parameters exactly.
+#                   },
+#               },
+#           ],
+#       },
+#   }
+#
+# Example (hash design):
+#   MODULE_HIERARCHY = {
+#       "sm3_core": {
+#           "submodules": [
+#               {
+#                   "instance_name": "u_expand",
+#                   "module": "w_gen_shift",
+#                   "connections": {
+#                       "w_reg":    "w_reg",
+#                       "round_cnt": "round_cnt",
+#                   },
+#               },
+#               {
+#                   "instance_name": "u_compress",
+#                   "module": "ff1_compress",
+#                   "connections": {
+#                       "A_reg":     "A_reg",
+#                       "W_j":       "W_j",
+#                       "W_prime_j": "W_prime_j",
+#                   },
+#               },
+#           ],
+#       },
+#   }
+#
+# Validation rules (enforced by hierarchy_check.py):
+#   1. Every "module" name must have a matching Section 5 Python function
+#   2. Every connection port name must match the function's parameter name
+#   3. Instance names must be unique within a parent module
+#
+# For leaf modules (no submodules), omit from MODULE_HIERARCHY or use empty list.
+
+# === Uncomment and fill in after designing Section 5 ===
+# MODULE_HIERARCHY = {
+#     "TOP_MODULE_NAME": {
+#         "submodules": [
+#             # Add submodule instances here
+#         ],
+#     },
+# }
 
 # ============================================================
 # Section 3: Algorithm Constants
