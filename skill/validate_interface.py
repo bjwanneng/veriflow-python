@@ -199,6 +199,23 @@ def validate_test_vector_structure(mod) -> list[str]:
     if len(tvs) < 2:
         errors.append(f"TEST_VECTORS has {len(tvs)} entries, need >= 2")
 
+    # Detect design category from first test vector's input keys
+    design_category = "hash"  # default
+    if tvs and isinstance(tvs[0], dict) and isinstance(tvs[0].get("inputs"), dict):
+        inputs_keys = set(tvs[0]["inputs"].keys())
+        if "blocks" in inputs_keys or "is_last_flags" in inputs_keys:
+            design_category = "hash"
+        elif "key" in inputs_keys or "plaintext" in inputs_keys:
+            design_category = "cipher"
+        elif "data_in" in inputs_keys and "valid" in inputs_keys:
+            design_category = "protocol"
+        elif "operand_a" in inputs_keys or "modulus" in inputs_keys:
+            design_category = "asymmetric"
+        elif "instruction" in inputs_keys or "rs1" in inputs_keys:
+            design_category = "processor"
+        elif "samples" in inputs_keys or "coefficients" in inputs_keys:
+            design_category = "dsp"
+
     for i, tv in enumerate(tvs):
         if not isinstance(tv, dict):
             errors.append(f"TEST_VECTORS[{i}] must be dict, got {type(tv).__name__}")
@@ -212,26 +229,40 @@ def validate_test_vector_structure(mod) -> list[str]:
             if not isinstance(inputs, dict):
                 errors.append(f"TEST_VECTORS[{i}]['inputs'] must be dict")
             else:
-                if "blocks" not in inputs:
-                    errors.append(f"TEST_VECTORS[{i}]['inputs'] missing 'blocks'")
-                if "is_last_flags" not in inputs:
-                    errors.append(f"TEST_VECTORS[{i}]['inputs'] missing 'is_last_flags'")
+                # Category-specific required keys
+                if design_category == "hash":
+                    if "blocks" not in inputs:
+                        errors.append(f"TEST_VECTORS[{i}]['inputs'] missing 'blocks'")
+                    if "is_last_flags" not in inputs:
+                        errors.append(f"TEST_VECTORS[{i}]['inputs'] missing 'is_last_flags'")
+                elif design_category == "cipher":
+                    if "key" not in inputs:
+                        errors.append(f"TEST_VECTORS[{i}]['inputs'] missing 'key'")
+                    if "plaintext" not in inputs:
+                        errors.append(f"TEST_VECTORS[{i}]['inputs'] missing 'plaintext'")
+                elif design_category == "protocol":
+                    if "data_in" not in inputs:
+                        errors.append(f"TEST_VECTORS[{i}]['inputs'] missing 'data_in'")
 
         if "expected" not in tv:
             errors.append(f"TEST_VECTORS[{i}] missing 'expected' key")
 
-    # Multi-block requirement
-    has_multi_block = any(
-        isinstance(tv, dict)
-        and isinstance(tv.get("inputs"), dict)
-        and len(tv["inputs"].get("blocks", [])) > 1
-        for tv in tvs
-    )
-    if not has_multi_block:
-        errors.append(
-            "TEST_VECTORS must include at least one multi-block test "
-            "(to verify is_first_block transitions and accumulator propagation)"
+    # Multi-block / multi-round requirement (category-specific)
+    if design_category == "hash":
+        has_multi_block = any(
+            isinstance(tv, dict)
+            and isinstance(tv.get("inputs"), dict)
+            and len(tv["inputs"].get("blocks", [])) > 1
+            for tv in tvs
         )
+        if not has_multi_block:
+            errors.append(
+                "TEST_VECTORS must include at least one multi-block test "
+                "(to verify is_first_block transitions and accumulator propagation)"
+            )
+    elif design_category == "cipher":
+        # For cipher, just ensure at least 2 vectors (already checked above)
+        pass
 
     return errors
 

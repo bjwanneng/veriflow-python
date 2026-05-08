@@ -144,8 +144,14 @@ if __name__ == "__main__":
         computed = compute(tv["inputs"], trace=False)
         ok = computed == tv["expected"]
         all_pass = all_pass and ok
-        h = tv["expected"].get("hash_out", 0)
-        print(f"[{'PASS' if ok else 'FAIL'}] {tv['name']}: hash_out=0x{h:064x}")
+        # Auto-detect primary output field (first non-input key)
+        _out_keys = [k for k in computed.keys()]
+        _primary = _out_keys[0] if _out_keys else "output"
+        _val = tv["expected"].get(_primary, 0)
+        if isinstance(_val, int) and _val > 0xFFFF:
+            print(f"[{'PASS' if ok else 'FAIL'}] {tv['name']}: {_primary}=0x{_val:08x}")
+        else:
+            print(f"[{'PASS' if ok else 'FAIL'}] {tv['name']}: {_primary}={_val}")
         if not ok:
             print(f"  expected: {tv['expected']}")
             print(f"  computed: {computed}")

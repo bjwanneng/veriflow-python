@@ -6,6 +6,37 @@
 - Clock domains must be explicitly declared
 - **Verilog-2005 only** — NO SystemVerilog (`logic`, `always_ff`, `assert property`, `|->`, `##`)
 
+## Reset Strategy Declaration `[REQUIRED]`
+
+design_spec.py Section 1 (Interface Definition) MUST include an explicit reset
+strategy declaration as a comment block. This makes the requirement machine-
+parseable for automated verification (`rtl_checker.py`).
+
+```python
+# Reset strategy: synchronous
+# Reset polarity: active_high
+# Reset signal name: rst
+```
+
+Supported values:
+- **strategy**: `synchronous` (default) or `asynchronous`
+- **polarity**: `active_high` (default) or `active_low`
+- **signal name**: `rst` (default) or `rst_n` (for active-low)
+
+Verilog mapping:
+
+| Strategy | Polarity | Sensitive list | Reset check |
+|----------|----------|---------------|-------------|
+| synchronous | active_high | `always @(posedge clk)` | `if (rst)` |
+| synchronous | active_low | `always @(posedge clk)` | `if (!rst_n)` |
+| asynchronous | active_high | `always @(posedge clk or posedge rst)` | `if (rst)` |
+| asynchronous | active_low | `always @(posedge clk or negedge rst_n)` | `if (!rst_n)` |
+
+**Default** (if not declared): synchronous active-high `rst`.
+
+**Automated check**: `rtl_checker.py --reset-strategy <strategy>` verifies the
+Verilog sensitive list matches the declared strategy.
+
 ## Interface Lock
 
 The following fields in design_spec.py are locked after Stage 1 completes. Stages 2-4 must NOT modify them:

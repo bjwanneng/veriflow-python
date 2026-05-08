@@ -214,3 +214,83 @@ assign calc_en = calc_en_reg;
 
 **Rule**: If golden model sets signals immediately on state entry → all related
 signals use `assign`. If delayed → all use registered. Mixing causes Pattern 19.
+
+---
+
+## C15. Instance Port Matching Checklist [MUST]
+
+Before writing ANY module instantiation, the agent MUST:
+1. Read the target module's Verilog file to extract its exact port declaration.
+2. Use named port connections only (`.port(signal)`) — never positional.
+3. Verify every port name matches the declaration exactly (case-sensitive).
+4. Verify every port width matches (no implicit truncation/extension).
+5. Connect ALL non-clock/reset ports — no dangling outputs or undriven inputs.
+
+**Prohibited**: Inventing port names not in the module declaration.
+
+```verilog
+// WRONG — port names fabricated:
+aes_key_expansion u_key (
+    .key_word_0(key_reg[127:96]),  // does not exist in module!
+    .new_word_0(key_word_0)        // does not exist!
+);
+
+// CORRECT — ports match the actual module declaration:
+aes_key_expansion u_key (
+    .key_words   (key_reg),
+    .round_num   (round_counter_reg),
+    .round_key   (round_key_expanded)
+);
+```
+
+**Automated check**: `rtl_checker.py --rtl-dir <dir>` catches port mismatches.
+
+---
+
+## C16. Testbench Driving Rules [MUST]
+
+All testbench signals consumed by the DUT's `always @(posedge clk)` block
+MUST use non-blocking assignment (`<=`). Only `clk` itself may use blocking
+assignment (`=`).
+
+```verilog
+// WRONG — blocking assignment causes race condition:
+always @(posedge clk) begin
+    rst_n = 1'b0;   // DUT may sample stale value
+    start = 1'b1;   // DUT may miss this
+end
+
+// CORRECT — non-blocking assignment:
+always @(posedge clk) begin
+    rst_n  <= 1'b0;
+    start  <= 1'b1;
+    data_in <= test_data;
+end
+
+// Clock generation (only exception):
+always #5 clk = ~clk;  // OK to use blocking for clock
+```
+
+**Automated check**: `rtl_checker.py --tb-dir <dir>` catches blocking assignments.
+
+---
+
+## C17. Counter Boundary Verification Table [MUST]
+
+For any FSM with "execute N rounds/iterations", the agent MUST produce a
+verification table before coding, listing every cycle's counter value:
+
+```
+| Cycle | rc value (enter) | rc value (exit) | Action      |
+|-------|-----------------|-----------------|-------------|
+| 1     | 2               | 3               | Round 1     |
+| 2     | 3               | 4               | Round 2     |
+| ...   | ...             | ...             | ...         |
+| 8     | 9               | 10              | Round 8     |
+| 9     | 10              | 11              | Round 9     |
+| exit  | 10              | —               | → ROUND_10  |
+```
+
+Common error: entering state with rc=2, exiting at rc=9 only executes 8 rounds
+(need 9). The exit condition must be `rc == N+1` when entering at rc=2 and
+needing N rounds.

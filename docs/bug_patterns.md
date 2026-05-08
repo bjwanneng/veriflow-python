@@ -920,3 +920,150 @@ Match the golden model's control signal timing pattern:
 1. Check if the golden model uses combinational or registered control
 2. Compare Verilog implementation — if mismatched, this is Pattern 19
 3. Fix: change ALL related control signals to match the golden model's timing
+
+---
+
+## Pattern 20: Port Name Fabrication
+
+**Discovered in**: AES-128 design (aes_128_core.v instantiating aes_key_expansion)
+
+### Symptom
+
+Compilation error or silent functional failure. Module instantiation uses port
+names that do not exist in the target module's declaration. Often the fabricated
+names are "plausible" (e.g., `.key_word_0()` instead of `.key_words()`).
+
+### Root Cause
+
+Agent generates instantiation code without first reading the target module's
+actual port declaration. Common in multi-agent parallel generation where top-level
+and submodule agents don't share interface information.
+
+### Example
+
+```verilog
+// Module declaration (actual):
+module aes_key_expansion (
+    input  wire [127:0] key_words,
+    input  wire [3:0]   round_num,
+    output wire [127:0] round_key
+);
+
+// Instance (WRONG — fabricated port names):
+aes_key_expansion u_key (
+    .key_word_0(key_reg[127:96]),  // does not exist!
+    .new_word_0(key_word_0),       // does not exist!
+);
+
+// Instance (CORRECT — matching actual ports):
+aes_key_expansion u_key (
+    .key_words   (key_reg),
+    .round_num   (round_counter_reg),
+    .round_key   (round_key_expanded)
+);
+```
+
+### Fix
+
+1. Read the target module's Verilog file to extract its exact port list.
+2. Use only named port connections (`.port(signal)`).
+3. Verify every port name matches case-sensitively.
+
+### Prevention
+
+**codegen stage**: ALWAYS read the target module file before writing an
+instantiation. Use `rtl_checker.py --rtl-dir <dir>` to auto-detect mismatches.
+
+**coding_style_core.md C15**: Instance port matching checklist is MANDATORY.
+
+---
+
+## Pattern 21: Testbench Blocking Assignment Race
+
+**Discovered in**: AES-128 testbench (tb_aes_128_core.v)
+
+### Symptom
+
+First test vector always times out or fails. Subsequent vectors may pass
+intermittently. The DUT appears to never see `start`, `rst_n`, or `data_in`
+changes.
+
+### Root Cause
+
+Blocking assignment (`=`) in testbench clock-synchronized blocks creates a
+race condition with the DUT's `always @(posedge clk)`. In Verilog's event
+queue, the execution order between blocking assignments in the testbench and
+the DUT's always block is not guaranteed.
+
+```verilog
+// WRONG — race condition:
+always @(posedge clk) begin
+    rst_n = 1'b0;   // blocking: DUT may sample stale value
+    start = 1'b1;   // blocking: DUT may miss this entirely
+end
+
+// CORRECT — non-blocking:
+always @(posedge clk) begin
+    rst_n  <= 1'b0;  // non-blocking: DUT sees new value next edge
+    start  <= 1'b1;
+    data_in <= test_data;
+end
+```
+
+### Fix
+
+Replace ALL blocking assignments (`=`) with non-blocking (`<=`) for any signal
+consumed by the DUT's `always @(posedge clk)`. Only `clk` generation may use
+blocking assignment: `always #5 clk = ~clk;`
+
+### Prevention
+
+**coding_style_core.md C16**: All testbench sync-driven signals must use `<=`.
+
+**Automated**: `rtl_checker.py --tb-dir <dir>` detects blocking assignments in
+`@(posedge clk)` blocks.
+
+---
+
+## Pattern 22: Reset Strategy Syntax Mismatch
+
+**Discovered in**: AES-128 design (requirement: async low-active, code: sync)
+
+### Symptom
+
+Reset behavior does not match specification. During clock failure, device
+cannot be reset. Reset release timing may cause metastability.
+
+### Root Cause
+
+Agent confuses **polarity** (active-high/active-low) with **timing**
+(synchronous/asynchronous). Writing `if (!rst_n)` inside `always @(posedge clk)`
+is a **synchronous** reset, regardless of the signal name or polarity.
+
+```verilog
+// Requirement: "asynchronous reset, active-low"
+// WRONG — this is SYNCHRONOUS:
+always @(posedge clk) begin
+    if (!rst_n) begin ... end  // only checks at clock edge
+end
+
+// CORRECT — true asynchronous:
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin ... end  // checks immediately on rst_n falling edge
+end
+```
+
+### Fix
+
+1. Identify the reset strategy from design_spec.py Section 1 declaration.
+2. For synchronous: `always @(posedge clk)` + `if (rst)` or `if (!rst_n)`.
+3. For asynchronous: `always @(posedge clk or negedge rst_n)` + `if (!rst_n)`
+   or `always @(posedge clk or posedge rst)` + `if (rst)`.
+
+### Prevention
+
+**design_rules.md**: design_spec.py Section 1 MUST declare reset strategy,
+polarity, and signal name.
+
+**Automated**: `rtl_checker.py --reset-strategy <synchronous|asynchronous>`
+verifies the sensitive list matches the declared strategy.
