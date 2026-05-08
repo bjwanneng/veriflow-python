@@ -34,8 +34,12 @@ REQUIRED_INTERFACE = {
 # Required top-level variables
 REQUIRED_VARIABLES = [
     "DESIGN_NAME",
-    "MASK32",
     "TEST_VECTORS",
+]
+
+# Optional top-level variables (design-specific)
+OPTIONAL_VARIABLES = [
+    "MASK32",
 ]
 
 
@@ -52,7 +56,7 @@ def load_module(filepath: str):
 
 
 def validate_variables(mod) -> list[str]:
-    """Check that required top-level variables exist."""
+    """Check that required top-level variables exist and optional ones are typed correctly."""
     errors = []
     for var_name in REQUIRED_VARIABLES:
         if not hasattr(mod, var_name):
@@ -61,10 +65,13 @@ def validate_variables(mod) -> list[str]:
             val = getattr(mod, var_name)
             if var_name == "DESIGN_NAME" and not isinstance(val, str):
                 errors.append(f"DESIGN_NAME must be str, got {type(val).__name__}")
-            if var_name == "MASK32" and not isinstance(val, int):
-                errors.append(f"MASK32 must be int, got {type(val).__name__}")
             if var_name == "TEST_VECTORS" and not isinstance(val, list):
                 errors.append(f"TEST_VECTORS must be list, got {type(val).__name__}")
+    for var_name in OPTIONAL_VARIABLES:
+        if hasattr(mod, var_name):
+            val = getattr(mod, var_name)
+            if var_name == "MASK32" and not isinstance(val, int):
+                errors.append(f"MASK32 must be int, got {type(val).__name__}")
     return errors
 
 

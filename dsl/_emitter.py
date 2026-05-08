@@ -15,7 +15,7 @@ in docs/coding_style.md:
 from __future__ import annotations
 
 import math
-from typing import Optional
+import re
 
 from ._types import (
     Signal, Const, Value, Assignment,
@@ -296,17 +296,9 @@ class VerilogEmitter:
         for target_name, _ in comb_asns:
             sig_info = signals[target_name]
             if sig_info["timing"] == "wire":
-                has_reg = target_name in [
-                    asn.target.name for asn in module.d.sync.assignments
-                ]
-                if has_reg:
-                    lines.append(
-                        f"{self._indent}{target_name}_next = {target_name}_reg;"
-                    )
-                else:
-                    lines.append(
-                        f"{self._indent}{target_name}_next = {sig_info['width']}'d{sig_info['reset']};"
-                    )
+                lines.append(
+                    f"{self._indent}{target_name}_next = {sig_info['width']}'d{sig_info['reset']};"
+                )
 
         # Assignments
         for target_name, value_expr in comb_asns:
@@ -380,6 +372,7 @@ class VerilogEmitter:
     def _emit_internal_declarations(self, analysis: dict) -> list[str]:
         """Emit reg/wire declarations for internal signals."""
         signals = analysis["signals"]
+        comb_targets = {t for t, _ in analysis["comb_assignments"]}
         lines = []
 
         for name, info in signals.items():
@@ -390,9 +383,13 @@ class VerilogEmitter:
                     lines.append(
                         f"reg [{info['width']-1}:0] {name}_reg = {info['width']}'d{info['reset']};"
                     )
-                    lines.append(
-                        f"wire [{info['width']-1}:0] {name}_next;"
-                    )
+                    # _next is only needed if this signal is also driven in comb domain.
+                    # analyze() forbids dual-domain assignment, so this is currently
+                    # unreachable — kept for forward compatibility with mixed-timing ports.
+                    if name in comb_targets:
+                        lines.append(
+                            f"wire [{info['width']-1}:0] {name}_next;"
+                        )
                 elif info["timing"] == "wire" and info["direction"] == "output":
                     lines.append(
                         f"reg [{info['width']-1}:0] {name}_next;"
@@ -406,9 +403,11 @@ class VerilogEmitter:
                 lines.append(
                     f"reg {width_str}{name}_reg = {info['width']}'d{info['reset']};"
                 )
-                lines.append(
-                    f"wire {width_str}{name}_next;"
-                )
+                # _next is only needed when there is a comb assignment driving it.
+                if name in comb_targets:
+                    lines.append(
+                        f"wire {width_str}{name}_next;"
+                    )
             elif info["timing"] == "wire":
                 lines.append(
                     f"reg {width_str}{name}_next;"  # _next used in always @*
@@ -447,7 +446,6 @@ class VerilogEmitter:
 
         Returns list of issue strings (empty if all checks pass).
         """
-        import re
         signals = analysis["signals"]
         issues = []
 

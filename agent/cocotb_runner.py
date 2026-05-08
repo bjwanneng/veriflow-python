@@ -130,8 +130,7 @@ def main() -> int:
 
         build_dir.mkdir(parents=True, exist_ok=True)
 
-        # Copy test file to build_dir so cocotb can import it
-        # (cocotb's test_module discovery searches the test_dir)
+        # Collect RTL sources; cocotb discovers test_module from test_dir directly.
         rtl_sources = collect_rtl_sources(rtl_dir)
 
         if args.verbose:

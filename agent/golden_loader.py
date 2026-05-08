@@ -61,8 +61,11 @@ def load_golden_cycles(
             if hasattr(mod, "run"):
                 try:
                     golden_data = mod.run(test_vector_index=test_vector_index)
-                except TypeError:
-                    golden_data = mod.run()
+                except TypeError as e:
+                    if "unexpected keyword argument" in str(e) or "takes" in str(e):
+                        golden_data = mod.run()
+                    else:
+                        raise
                 if isinstance(golden_data, list):
                     for i, entry in enumerate(golden_data):
                         if isinstance(entry, dict):

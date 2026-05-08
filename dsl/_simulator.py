@@ -110,6 +110,16 @@ class CycleSimulator:
                 f"Check for combinational loops in the design."
             )
 
+        # Post-convergence: verify every comb target was successfully evaluated.
+        # Permanent errors (undefined signals, type mismatches) would leave a
+        # target unset after the loop, which we must not silently ignore.
+        for target_name, _ in self._analysis["comb_assignments"]:
+            if target_name not in ctx:
+                raise RuntimeError(
+                    f"Combinational signal '{target_name}' could not be evaluated. "
+                    f"Check that all referenced signals are defined and have valid values."
+                )
+
         # Step 2: Record trace snapshot (all signal values at this cycle)
         snapshot: dict[str, int] = {}
         for name, info in self._analysis["signals"].items():
@@ -129,8 +139,10 @@ class CycleSimulator:
             try:
                 computed = value_expr._eval(ctx)
                 pending_updates[target_name] = computed & _mask(sig_info["width"])
-            except (ValueError, KeyError):
-                pass  # keep current value
+            except (ValueError, KeyError) as e:
+                raise RuntimeError(
+                    f"Sync assignment to '{target_name}' failed to evaluate: {e}"
+                ) from e
 
         # Apply all updates simultaneously (NBA)
         for name, value in pending_updates.items():

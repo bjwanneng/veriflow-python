@@ -84,6 +84,11 @@ def remove_link(link: Path) -> None:
     if not link.exists() and not link.is_symlink() and not is_junction(link):
         return
 
+    # Symlinks first: unlink never follows, so it's safe for files and dirs
+    if link.is_symlink():
+        link.unlink()
+        return
+
     if sys.platform == "win32" and link.is_dir():
         if is_junction(link):
             # Junction: use rmdir (removes junction, not target)
@@ -91,8 +96,6 @@ def remove_link(link: Path) -> None:
         else:
             # Real directory: remove it
             shutil.rmtree(link)
-    elif link.is_symlink():
-        link.unlink()
     elif link.is_dir():
         shutil.rmtree(link)
     else:

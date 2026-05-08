@@ -137,7 +137,10 @@ class Value:
     def __lshift__(self, other) -> "_BinOp":
         other = _coerce(other)
         shift_cap = min(other._width, 8)
-        return _BinOp("<<", self, other, self._width + (1 << shift_cap))
+        # Cap extra width to avoid explosion (shifting by > width produces zeros
+        # in upper bits, so width * 2 is more than sufficient for hardware).
+        extra = min(1 << shift_cap, self._width)
+        return _BinOp("<<", self, other, self._width + extra)
 
     def __rlshift__(self, other) -> "_BinOp":
         return _coerce(other).__lshift__(self)

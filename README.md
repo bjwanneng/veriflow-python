@@ -167,6 +167,18 @@ mklink /D "%USERPROFILE%\.claude\skills\vf-pyverilog" "C:\path\to\Veriflow-pytho
 python -m pytest dsl/tests/ -v
 ```
 
+## 最近更新
+
+- **install.py**: 修复 `remove_link()` 中符号链接跟随导致的误删目标目录风险（先判断 `is_symlink()` 再 `unlink`）
+- **dsl/_emitter.py**: 清理死代码（移除不可能触发的 `has_reg` 分支）；将内联 `import re` 移至模块顶部；修复纯 sync 信号仍声明未驱动 `_next` wire 的问题
+- **dsl/_simulator.py**: 收敛后增加 comb 目标未成功求值的显式报错；sync 域求值失败由静默忽略改为抛出 `RuntimeError`
+- **dsl/_types.py**: 限制 `__lshift__` 结果位宽上限，避免 shift_amount 位宽较大时位宽爆炸
+- **agent/cocotb_runner.py**: 移除过时的注释
+- **skill/validate_interface.py**: 将 `MASK32` 从必需变量改为可选变量，避免对非密码学设计的过度约束
+- **agent/golden_loader.py**: 收窄 `TypeError` 捕获范围，仅对签名不匹配 fallback，其余异常继续抛出
+- **agent/vcd2table.py**: 扩展信号名正则，支持大写字母或下划线开头的标识符
+- **skill/state.py**: `validate_design_spec()` 委托给 `validate_interface` 模块，消除重复验证逻辑
+
 ## 许可证
 
 内部使用

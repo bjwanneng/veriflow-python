@@ -256,8 +256,8 @@ def extract_failing_signals_from_log(log_path: str) -> list[str]:
     fail_lines = [l for l in text.splitlines() if re.search(r'\[FAIL\]|FAILED:', l)]
 
     for line in fail_lines:
-        # Extract identifiers that look like signal names (snake_case words)
-        words = re.findall(r'\b([a-z][a-z0-9_]+(?:_reg|_next|_out|_in|_valid|_ready|_en|_flag)?)\b', line)
+        # Extract identifiers that look like signal names (Verilog-style identifiers)
+        words = re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]*(?:_reg|_next|_out|_in|_valid|_ready|_en|_flag)?)\b', line)
         signals.extend(words)
 
     # Remove common non-signal words
